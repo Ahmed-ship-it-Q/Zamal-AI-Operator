@@ -1,10 +1,10 @@
 # Zamal AI Operator — Current Handoff
 
 ## Status
-Overall verification: GREEN
+Requested expansion focused verification: GREEN
 
-- Full regression: 799/799 PASS
-- Expansion privacy/security: 37/37 PASS
+- Focused expansion: 37/37 PASS
+- Full regression attempt: 799 tests; 10 failures; 91 errors in sanitized cloud runtime
 - CPC project HEAD: eae0f7b
 - CPC baseline diff hash unchanged
 - CPC baseline status hash unchanged
@@ -52,6 +52,10 @@ Built/verified code paths include:
 - GitHub read boundary
 - Gmail/Calendar connector boundary
 - capability status reporting
+
+The 2026-09-11 sanitized cloud verification record is `outbox/2026-09-11/capability-expansion/verification.json`.
+Gmail and Calendar remain implemented but awaiting n8n-owned OAuth credentials and harmless live reads.
+GitHub public reads, Job Automation, and Business Research remain verified within their stated public/fixture scopes.
 
 Do not assume external account actions are LIVE unless separately authenticated and verified.
 

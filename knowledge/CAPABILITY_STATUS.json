@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "updated_at": "2026-09-10T02:45:56.322085+00:00",
-  "scope": "Pre-final expansion evidence status; not a 99-percent readiness claim",
+  "updated_at": "2026-09-11T00:00:00+00:00",
+  "scope": "Sanitized cloud verification of requested expansion; not a 99-percent readiness claim",
   "capabilities": [
     {
       "name": "Operator Core",
@@ -76,9 +76,13 @@
         {
           "path": "outbox/2026-09-09/capability-expansion/live-verification.json",
           "sha256": "21016a05c38215c6643aea5a60da93723af88c3fc22efdc31c0b078a09ad0ee9"
+        },
+        {
+          "path": "outbox/2026-09-11/capability-expansion/verification.json",
+          "sha256": "71d4a5f3cf9f8ec6abdd5288b4deb5e874a8c965992e8c23e45f1a776936fea0"
         }
       ],
-      "owner_action": "Connect a Gmail OAuth2 credential in local n8n using least-privilege read scope; then verify a harmless read"
+      "owner_action": "Connect a Gmail OAuth2 credential in local n8n using least-privilege read scope; then verify a harmless read. Credential unavailable in sanitized cloud runtime."
     },
     {
       "name": "Google Calendar",
@@ -88,9 +92,13 @@
         {
           "path": "outbox/2026-09-09/capability-expansion/live-verification.json",
           "sha256": "21016a05c38215c6643aea5a60da93723af88c3fc22efdc31c0b078a09ad0ee9"
+        },
+        {
+          "path": "outbox/2026-09-11/capability-expansion/verification.json",
+          "sha256": "71d4a5f3cf9f8ec6abdd5288b4deb5e874a8c965992e8c23e45f1a776936fea0"
         }
       ],
-      "owner_action": "Connect Google Calendar OAuth2 in local n8n with read-only scope; then verify a harmless read"
+      "owner_action": "Connect Google Calendar OAuth2 in local n8n with read-only scope; then verify a harmless read. Credential unavailable in sanitized cloud runtime."
     },
     {
       "name": "GitHub",
@@ -104,6 +112,10 @@
         {
           "path": "outbox/2026-09-10/capability-expansion/verification.json",
           "sha256": "15c6dc8429ddccfb5a94b2497a6b8da9deaaa10dd520a2998feee531c0a50e39"
+        },
+        {
+          "path": "outbox/2026-09-11/capability-expansion/verification.json",
+          "sha256": "71d4a5f3cf9f8ec6abdd5288b4deb5e874a8c965992e8c23e45f1a776936fea0"
         }
       ],
       "owner_action": "Optional: connect GitHub OAuth2 in n8n for authorized private repository reads"
@@ -120,6 +132,10 @@
         {
           "path": "outbox/2026-09-10/capability-expansion/verification.json",
           "sha256": "15c6dc8429ddccfb5a94b2497a6b8da9deaaa10dd520a2998feee531c0a50e39"
+        },
+        {
+          "path": "outbox/2026-09-11/capability-expansion/verification.json",
+          "sha256": "71d4a5f3cf9f8ec6abdd5288b4deb5e874a8c965992e8c23e45f1a776936fea0"
         }
       ],
       "owner_action": null
@@ -143,6 +159,10 @@
         {
           "path": "outbox/2026-09-10/capability-expansion/verification.json",
           "sha256": "15c6dc8429ddccfb5a94b2497a6b8da9deaaa10dd520a2998feee531c0a50e39"
+        },
+        {
+          "path": "outbox/2026-09-11/capability-expansion/verification.json",
+          "sha256": "71d4a5f3cf9f8ec6abdd5288b4deb5e874a8c965992e8c23e45f1a776936fea0"
         }
       ],
       "owner_action": null

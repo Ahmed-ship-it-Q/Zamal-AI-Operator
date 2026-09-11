@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import selectors
 import signal
 import subprocess
@@ -9,7 +10,7 @@ import time
 from .providers import Availability, ProviderUnavailable, ProviderUncertain
 from .store import encode
 
-NODE=Path('/Users/book/.nvm/versions/node/v22.23.2/bin/node')
+NODE=Path(shutil.which(os.environ.get('ZAMAL_NODE') or 'node') or '')
 BRIDGE=Path(__file__).with_name('gemini_bridge.cjs')
 
 class GeminiTextTransport:

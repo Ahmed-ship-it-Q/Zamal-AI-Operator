@@ -149,8 +149,9 @@ class ConnectionRegistry:
         import hashlib
         from pathlib import Path
         from .worker import Paths
-        root=Path(root or Path(__file__).resolve().parent.parent)
-        paths=Paths(root, '/Users/book/Desktop/AI-GROCERY-DECISION-PLATFORM')
+        root=Path(root or Path(__file__).resolve().parent.parent).resolve()
+        cpc=root.parent if root.parent != root else root / '.cpc-root'
+        paths=Paths(root, cpc)
         report=json.loads(paths.read('operator','knowledge/CAPABILITY_STATUS.json'))
         allowed={'LIVE_VERIFIED','CONNECTED','IMPLEMENTED_AWAITING_AUTH','AVAILABLE_NOT_ACTIVE','BLOCKED','OPTIONAL_EXPANSION'}
         if report.get('schema')!=1 or not isinstance(report.get('capabilities'),list):raise Denied('Invalid capability report')
