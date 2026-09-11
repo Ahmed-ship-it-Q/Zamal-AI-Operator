@@ -1,0 +1,16 @@
+.env
+.env.*
+*.pem
+*.key
+*.crt
+.n8n-data/
+state/
+inbox/
+outbox/
+logs/
+approvals/
+reports/
+node_modules/
+.claude/
+.aider*
+.DS_Store

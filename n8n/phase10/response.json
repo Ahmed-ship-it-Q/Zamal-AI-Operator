@@ -1,0 +1,50 @@
+{
+  "name": "Zamal Phase 10 response",
+  "active": false,
+  "nodes": [
+    {
+      "id": "4c9ddcc3-49a3-4fe7-9f7e-4645e2ca55b9",
+      "name": "Input",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "bc173682-b9b2-4e9e-9948-b887560180a1",
+      "name": "Contract",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const id=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(v)?v:null; const p=$json; const allowed=['SUCCESS','RECORDED','PLANNED','APPROVAL_REQUIRED','DUPLICATE','DENIED','FAILED','UNAVAILABLE','NOT_CONFIGURED','TIMEOUT','NOT_VERIFIED']; const outcome=allowed.includes(p.outcome)?p.outcome:'NOT_VERIFIED'; return [{json:{outcome,ok:['SUCCESS','RECORDED','PLANNED','APPROVAL_REQUIRED'].includes(outcome),event_id:id(p.event_id),task_id:id(p.task_id),action_id:id(p.action_id),approval_id:id(p.approval_id)}}];"
+      }
+    }
+  ],
+  "connections": {
+    "Input": {
+      "main": [
+        [
+          {
+            "node": "Contract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "id": "ZamalP10Response01"
+}

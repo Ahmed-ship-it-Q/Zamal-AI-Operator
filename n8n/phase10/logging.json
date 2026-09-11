@@ -1,0 +1,50 @@
+{
+  "name": "Zamal Phase 10 logging",
+  "active": false,
+  "nodes": [
+    {
+      "id": "62b4e205-299f-4c98-91a2-6a9114908b88",
+      "name": "Input",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "aa5507d5-9578-44da-a126-ceb779d3ac8f",
+      "name": "Contract",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const id=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(v)?v:null; const p=$json; return [{json:{event_id:id(p.event_id),task_id:id(p.task_id),action_id:id(p.action_id),outcome:['SUCCESS','RECORDED','PLANNED','APPROVAL_REQUIRED','DUPLICATE','DENIED','FAILED','UNAVAILABLE','NOT_CONFIGURED','TIMEOUT','NOT_VERIFIED'].includes(p.outcome)?p.outcome:'NOT_VERIFIED'}}];"
+      }
+    }
+  ],
+  "connections": {
+    "Input": {
+      "main": [
+        [
+          {
+            "node": "Contract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "id": "ZamalP10Logging01"
+}

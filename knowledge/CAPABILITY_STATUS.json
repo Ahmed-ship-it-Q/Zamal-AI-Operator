@@ -1,0 +1,308 @@
+{
+  "schema": 1,
+  "updated_at": "2026-09-10T02:45:56.322085+00:00",
+  "scope": "Pre-final expansion evidence status; not a 99-percent readiness claim",
+  "capabilities": [
+    {
+      "name": "Operator Core",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Canonical task/action persistence, result hashing and local business coordination; prior live provider handoff preserved",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-10/capability-expansion/verification.json",
+          "sha256": "15c6dc8429ddccfb5a94b2497a6b8da9deaaa10dd520a2998feee531c0a50e39"
+        },
+        {
+          "path": "outbox/2026-09-09/capability-expansion/live-verification.json",
+          "sha256": "21016a05c38215c6643aea5a60da93723af88c3fc22efdc31c0b078a09ad0ee9"
+        },
+        {
+          "path": "outbox/2026-09-09/phase4-gemini/live-verification-c611b597-dbda-4028-ae14-edfde9ccf512.json",
+          "sha256": "9936d8aa5a08878781c020c1ece6f5a8a77b5ab52d0146ce60d7f83bd7db87be"
+        }
+      ],
+      "owner_action": null
+    },
+    {
+      "name": "Gemini",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Prior real planner/coder/verifier handoff; not reinvoked in this continuation",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-09/phase4-gemini/live-verification-c611b597-dbda-4028-ae14-edfde9ccf512.json",
+          "sha256": "9936d8aa5a08878781c020c1ece6f5a8a77b5ab52d0146ce60d7f83bd7db87be"
+        }
+      ],
+      "owner_action": null
+    },
+    {
+      "name": "Claude",
+      "status": "BLOCKED",
+      "verified_scope": "Host subscription authenticated previously; restrictive sandbox cannot authenticate; adapter dormant",
+      "evidence": [],
+      "owner_action": "No action requested in this continuation; do not broaden private-data permissions"
+    },
+    {
+      "name": "Codex",
+      "status": "BLOCKED",
+      "verified_scope": "Unchanged unified_exec safety preflight; no bypass",
+      "evidence": [],
+      "owner_action": "Future runtime satisfying existing safety contract"
+    },
+    {
+      "name": "OpenAI",
+      "status": "AVAILABLE_NOT_ACTIVE",
+      "verified_scope": "Paid adapter dormant; not required or invoked",
+      "evidence": [],
+      "owner_action": null
+    },
+    {
+      "name": "Provider Router",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Prior deterministic Gemini handoff and canonical context; uncertainty never auto-retries",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-09/phase4-gemini/live-verification-c611b597-dbda-4028-ae14-edfde9ccf512.json",
+          "sha256": "9936d8aa5a08878781c020c1ece6f5a8a77b5ab52d0146ce60d7f83bd7db87be"
+        }
+      ],
+      "owner_action": null
+    },
+    {
+      "name": "Gmail",
+      "status": "IMPLEMENTED_AWAITING_AUTH",
+      "verified_scope": "Imported-message analysis/drafts and OAuth read boundary tested; no live mailbox access",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-09/capability-expansion/live-verification.json",
+          "sha256": "21016a05c38215c6643aea5a60da93723af88c3fc22efdc31c0b078a09ad0ee9"
+        }
+      ],
+      "owner_action": "Connect a Gmail OAuth2 credential in local n8n using least-privilege read scope; then verify a harmless read"
+    },
+    {
+      "name": "Google Calendar",
+      "status": "IMPLEMENTED_AWAITING_AUTH",
+      "verified_scope": "Imported agenda/conflict/free-time analysis and OAuth read boundary tested; no live calendar access",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-09/capability-expansion/live-verification.json",
+          "sha256": "21016a05c38215c6643aea5a60da93723af88c3fc22efdc31c0b078a09ad0ee9"
+        }
+      ],
+      "owner_action": "Connect Google Calendar OAuth2 in local n8n with read-only scope; then verify a harmless read"
+    },
+    {
+      "name": "GitHub",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Public unauthenticated repository and CI reads only; private/authenticated reads need OAuth",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-09/capability-expansion/live-verification.json",
+          "sha256": "21016a05c38215c6643aea5a60da93723af88c3fc22efdc31c0b078a09ad0ee9"
+        },
+        {
+          "path": "outbox/2026-09-10/capability-expansion/verification.json",
+          "sha256": "15c6dc8429ddccfb5a94b2497a6b8da9deaaa10dd520a2998feee531c0a50e39"
+        }
+      ],
+      "owner_action": "Optional: connect GitHub OAuth2 in n8n for authorized private repository reads"
+    },
+    {
+      "name": "Job Automation",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Greenhouse discovery: 20 ranked real jobs, evidence/persistence/replay verified. Lever/Netlify unavailable. Application preparation/tracking fixture-tested; no submission",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-09/capability-expansion/live-verification.json",
+          "sha256": "21016a05c38215c6643aea5a60da93723af88c3fc22efdc31c0b078a09ad0ee9"
+        },
+        {
+          "path": "outbox/2026-09-10/capability-expansion/verification.json",
+          "sha256": "15c6dc8429ddccfb5a94b2497a6b8da9deaaa10dd520a2998feee531c0a50e39"
+        }
+      ],
+      "owner_action": null
+    },
+    {
+      "name": "LinkedIn Connector",
+      "status": "IMPLEMENTED_AWAITING_AUTH",
+      "verified_scope": "Optional boundary only; no scraping, cookie/password reuse or external writes",
+      "evidence": [],
+      "owner_action": "Provide an authorized supported LinkedIn integration; public job sources work independently"
+    },
+    {
+      "name": "Web/Business Research",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Two public sources collected, hashed and cited; extractive comparison only. Search-provider path and factual corroboration not live-verified",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-09/capability-expansion/live-verification.json",
+          "sha256": "21016a05c38215c6643aea5a60da93723af88c3fc22efdc31c0b078a09ad0ee9"
+        },
+        {
+          "path": "outbox/2026-09-10/capability-expansion/verification.json",
+          "sha256": "15c6dc8429ddccfb5a94b2497a6b8da9deaaa10dd520a2998feee531c0a50e39"
+        }
+      ],
+      "owner_action": null
+    },
+    {
+      "name": "Business Orchestration",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Canonical child tasks for imported communication/calendar; protected send remained pending and was rejected with zero side effect",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-09/capability-expansion/live-verification.json",
+          "sha256": "21016a05c38215c6643aea5a60da93723af88c3fc22efdc31c0b078a09ad0ee9"
+        },
+        {
+          "path": "outbox/2026-09-10/capability-expansion/verification.json",
+          "sha256": "15c6dc8429ddccfb5a94b2497a6b8da9deaaa10dd520a2998feee531c0a50e39"
+        }
+      ],
+      "owner_action": null
+    },
+    {
+      "name": "n8n",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Readiness health confirmed; workflows and encrypted credential records unchanged",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-10/capability-expansion/verification.json",
+          "sha256": "15c6dc8429ddccfb5a94b2497a6b8da9deaaa10dd520a2998feee531c0a50e39"
+        }
+      ],
+      "owner_action": null
+    },
+    {
+      "name": "Telegram",
+      "status": "CONNECTED",
+      "verified_scope": "Prior documented getMe connection and completed Phase 11 preserved; not re-probed in this continuation",
+      "evidence": [],
+      "owner_action": null
+    },
+    {
+      "name": "Voice/STT",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Prior real Apple Speech transcript/intake verification preserved; not re-run",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-09/phase5/live-verification.json",
+          "sha256": "380edf9facfc7a7586ae65c03c5fa6ce0c03823a3a78520e3ce17e0ce95d070b"
+        }
+      ],
+      "owner_action": null
+    },
+    {
+      "name": "Mac Operations",
+      "status": "AVAILABLE_NOT_ACTIVE",
+      "verified_scope": "Scoped worker preserved and regression-tested; no desktop or application control activated",
+      "evidence": [],
+      "owner_action": null
+    },
+    {
+      "name": "CPC Inspector",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Healthy/readOnly=true; CPC status and binary diff unchanged",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-10/capability-expansion/verification.json",
+          "sha256": "15c6dc8429ddccfb5a94b2497a6b8da9deaaa10dd520a2998feee531c0a50e39"
+        }
+      ],
+      "owner_action": null
+    },
+    {
+      "name": "Documents/Knowledge",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Prior local reference catalog operations; not unrestricted private file access",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-09/phase14/live-verification.json",
+          "sha256": "b0d16bb41316b1cc144d5b58b3a39ac20d2a8d6e7cfa3ca34ce7da0728f3721d"
+        }
+      ],
+      "owner_action": null
+    },
+    {
+      "name": "Approval System",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Pending protected action denied, explicitly rejected, and prior approved inference executed once",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-09/capability-expansion/live-verification.json",
+          "sha256": "21016a05c38215c6643aea5a60da93723af88c3fc22efdc31c0b078a09ad0ee9"
+        },
+        {
+          "path": "outbox/2026-09-10/capability-expansion/verification.json",
+          "sha256": "15c6dc8429ddccfb5a94b2497a6b8da9deaaa10dd520a2998feee531c0a50e39"
+        },
+        {
+          "path": "outbox/2026-09-09/phase4-gemini/live-verification-c611b597-dbda-4028-ae14-edfde9ccf512.json",
+          "sha256": "9936d8aa5a08878781c020c1ece6f5a8a77b5ab52d0146ce60d7f83bd7db87be"
+        }
+      ],
+      "owner_action": null
+    },
+    {
+      "name": "Verification/Evidence",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Stored canonical results match evidence hashes; report references are hash-validated",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-10/capability-expansion/verification.json",
+          "sha256": "15c6dc8429ddccfb5a94b2497a6b8da9deaaa10dd520a2998feee531c0a50e39"
+        }
+      ],
+      "owner_action": null
+    },
+    {
+      "name": "Recovery",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Completed result persistence verified after reopening SQLite; no automatic replay",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-10/capability-expansion/verification.json",
+          "sha256": "15c6dc8429ddccfb5a94b2497a6b8da9deaaa10dd520a2998feee531c0a50e39"
+        },
+        {
+          "path": "outbox/2026-09-09/capability-expansion/live-verification.json",
+          "sha256": "21016a05c38215c6643aea5a60da93723af88c3fc22efdc31c0b078a09ad0ee9"
+        }
+      ],
+      "owner_action": null
+    },
+    {
+      "name": "Replay Protection",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Canonical action replay denied during existing live verification",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-09/capability-expansion/live-verification.json",
+          "sha256": "21016a05c38215c6643aea5a60da93723af88c3fc22efdc31c0b078a09ad0ee9"
+        }
+      ],
+      "owner_action": null
+    },
+    {
+      "name": "Emergency Stop",
+      "status": "AVAILABLE_NOT_ACTIVE",
+      "verified_scope": "Latched controls preserved and adversarially tested; global emergency state not changed in production",
+      "evidence": [],
+      "owner_action": null
+    },
+    {
+      "name": "Private Filesystem Protection",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Nine prohibited personal paths denied without reading content; inbox ancestor-symlink escape fixed and tested. Trusted runtime/auth readers remain narrowly scoped",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-10/capability-expansion/verification.json",
+          "sha256": "15c6dc8429ddccfb5a94b2497a6b8da9deaaa10dd520a2998feee531c0a50e39"
+        }
+      ],
+      "owner_action": null
+    }
+  ]
+}

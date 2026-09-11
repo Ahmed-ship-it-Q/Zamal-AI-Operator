@@ -1,0 +1,50 @@
+{
+  "name": "Zamal Phase 10 error",
+  "active": false,
+  "nodes": [
+    {
+      "id": "37b64324-6169-43cf-a808-07e1e4746ccc",
+      "name": "Input",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "d59c6795-830f-43c6-9252-1d4d82509280",
+      "name": "Contract",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const id=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(v)?v:null; const p=$json; const allowed=['DENIED','FAILED','UNAVAILABLE','NOT_CONFIGURED','TIMEOUT','NOT_VERIFIED']; return [{json:{ok:false,outcome:allowed.includes(p.outcome)?p.outcome:'FAILED',code:'integration_failed',event_id:id(p.event_id)}}];"
+      }
+    }
+  ],
+  "connections": {
+    "Input": {
+      "main": [
+        [
+          {
+            "node": "Contract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "id": "ZamalP10Error01"
+}

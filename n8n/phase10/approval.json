@@ -1,0 +1,50 @@
+{
+  "name": "Zamal Phase 10 approval",
+  "active": false,
+  "nodes": [
+    {
+      "id": "b97c8191-24ea-41b9-abae-d4d69989f22d",
+      "name": "Input",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "15fa0b1b-ca9b-4498-b701-92256a64db98",
+      "name": "Contract",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const id=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(v)?v:null; const p=$json; if(p.outcome!=='APPROVAL_REQUIRED'||!id(p.task_id)||!id(p.action_id)||!id(p.approval_id)) throw new Error('missing_operator_approval'); return [{json:{outcome:'APPROVAL_REQUIRED',task_id:p.task_id,action_id:p.action_id,approval_id:p.approval_id,choices:['APPROVE','EDIT','REJECT'],authority:'Operator Phase 9 trusted-local control plane'}}];"
+      }
+    }
+  ],
+  "connections": {
+    "Input": {
+      "main": [
+        [
+          {
+            "node": "Contract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "id": "ZamalP10Approval01"
+}

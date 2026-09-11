@@ -1,0 +1,89 @@
+{
+  "name": "Zamal Phase 10 intake",
+  "active": false,
+  "nodes": [
+    {
+      "id": "d12f3b35-394a-4685-a83a-c05a193a89ee",
+      "name": "Input",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "4e545b9f-8989-4fa1-ad03-f0b4341bbb41",
+      "name": "Contract",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const p = $json; if (!p.event_type || !p.event_key || !p.payload) throw new Error('invalid_envelope'); return [{json:{event_type:p.event_type,event_key:p.event_key,payload:p.payload}}];"
+      }
+    },
+    {
+      "id": "812d61a6-089b-4cc7-b315-6e6d3d2f84b4",
+      "name": "Operator gateway",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8788/events",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "8eaed8a2843a748e",
+          "name": "Zamal Operator Gateway"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Input": {
+      "main": [
+        [
+          {
+            "node": "Contract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contract": {
+      "main": [
+        [
+          {
+            "node": "Operator gateway",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "id": "ZamalP10Intake01"
+}
