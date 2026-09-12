@@ -1,1 +1,30 @@
-{"read_only_discovery": true, "telegram_credentials": "existing ZAMAL_TELEGRAM_TOKEN environment credential", "chat_id": "ZAMAL_TELEGRAM_CHAT_ID or safe getUpdates discovery", "linkedin": {"login": false, "password": false, "cookies": false, "session_reuse": false, "direct_scraping": false}, "auto_apply": false, "submission_requires_owner_approval": true}
+{
+  "discovery_mode": "autonomous",
+  "read_only_public_discovery": true,
+  "telegram_credentials": "existing ZAMAL_TELEGRAM_TOKEN environment credential",
+  "chat_id": "ZAMAL_TELEGRAM_CHAT_ID or safe getUpdates discovery",
+  "approval_channel": "telegram",
+  "approval_choices": ["APPROVE", "EDIT", "REJECT"],
+  "autonomous_preparation": true,
+  "job_match_and_suitability": true,
+  "ai_model_routing": true,
+  "cv_tailoring": true,
+  "cover_letter_generation": true,
+  "browser_application_prepare": true,
+  "browser_session_policy": "authorized owner session only",
+  "form_fill_before_approval": true,
+  "document_upload_before_approval": true,
+  "final_submit_requires_owner_approval": true,
+  "post_approval_executor": "zamal_ai_operator",
+  "post_approval_verify_and_log": true,
+  "linkedin": {
+    "supported_authenticated_path_only": true,
+    "password_harvesting": false,
+    "cookie_theft_or_export": false,
+    "security_bypass": false,
+    "direct_scraping": false
+  },
+  "delete_without_fresh_approval": false,
+  "external_send_without_approval": false,
+  "auto_apply_without_approval": false
+}
