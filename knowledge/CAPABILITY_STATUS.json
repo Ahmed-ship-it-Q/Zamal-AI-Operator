@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "updated_at": "2026-09-11T00:00:00+00:00",
+  "updated_at": "2026-09-11T23:13:44.814162+00:00",
   "scope": "Sanitized cloud verification of requested expansion; not a 99-percent readiness claim",
   "capabilities": [
     {
@@ -70,8 +70,8 @@
     },
     {
       "name": "Gmail",
-      "status": "IMPLEMENTED_AWAITING_AUTH",
-      "verified_scope": "Imported-message analysis/drafts and OAuth read boundary tested; no live mailbox access",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Authorized local n8n Gmail OAuth connection; harmless live read verified.",
       "evidence": [
         {
           "path": "outbox/2026-09-09/capability-expansion/live-verification.json",
@@ -82,12 +82,12 @@
           "sha256": "71d4a5f3cf9f8ec6abdd5288b4deb5e874a8c965992e8c23e45f1a776936fea0"
         }
       ],
-      "owner_action": "Connect a Gmail OAuth2 credential in local n8n using least-privilege read scope; then verify a harmless read. Credential unavailable in sanitized cloud runtime."
+      "owner_action": "None for current verified read capability."
     },
     {
       "name": "Google Calendar",
-      "status": "IMPLEMENTED_AWAITING_AUTH",
-      "verified_scope": "Imported agenda/conflict/free-time analysis and OAuth read boundary tested; no live calendar access",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Authorized local n8n Google Calendar OAuth connection; harmless live read verified.",
       "evidence": [
         {
           "path": "outbox/2026-09-09/capability-expansion/live-verification.json",
@@ -98,12 +98,12 @@
           "sha256": "71d4a5f3cf9f8ec6abdd5288b4deb5e874a8c965992e8c23e45f1a776936fea0"
         }
       ],
-      "owner_action": "Connect Google Calendar OAuth2 in local n8n with read-only scope; then verify a harmless read. Credential unavailable in sanitized cloud runtime."
+      "owner_action": "None for current verified read capability."
     },
     {
       "name": "GitHub",
       "status": "LIVE_VERIFIED",
-      "verified_scope": "Public unauthenticated repository and CI reads only; private/authenticated reads need OAuth",
+      "verified_scope": "Public repository/CI reads plus authorized private repository read verified using least-privilege credential.",
       "evidence": [
         {
           "path": "outbox/2026-09-09/capability-expansion/live-verification.json",
@@ -118,7 +118,7 @@
           "sha256": "71d4a5f3cf9f8ec6abdd5288b4deb5e874a8c965992e8c23e45f1a776936fea0"
         }
       ],
-      "owner_action": "Optional: connect GitHub OAuth2 in n8n for authorized private repository reads"
+      "owner_action": "None for current verified read capability."
     },
     {
       "name": "Job Automation",
