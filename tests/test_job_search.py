@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -66,7 +67,8 @@ class JobSearchTests(unittest.TestCase):
             if method == "getUpdates":
                 return {"ok": True, "result": [{"message": {"chat": {"id": 987}}}]}
             return {"ok": True, "result": {"message_id": 43}}
-        result = send_shortlist({"status": FRESH_RESULTS, "result_origin": "FRESH", "jobs": []}, token="x" * 25, api_call=fake_api)
+        with patch.dict(os.environ, {"ZAMAL_TELEGRAM_CHAT_ID": ""}, clear=False):
+            result = send_shortlist({"status": FRESH_RESULTS, "result_origin": "FRESH", "jobs": []}, token="x" * 25, api_call=fake_api)
         self.assertEqual(result["status"], "SENT")
         self.assertEqual(result["chat_id"], "987")
         self.assertEqual(calls, ["getUpdates", "sendMessage"])
