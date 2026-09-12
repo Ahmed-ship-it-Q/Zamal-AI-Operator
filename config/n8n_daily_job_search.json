@@ -1,0 +1,1 @@
+{"name": "Daily Personal Job Search", "active": false, "managed_by": "macOS LaunchAgent", "notes": "Metadata only in this n8n installation; no Execute Command node dependency and no duplicate workflow.", "steps": ["public discovery", "fallback persistence", "shortlist", "Telegram notification"]}

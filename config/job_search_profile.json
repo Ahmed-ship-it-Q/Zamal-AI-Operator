@@ -1,0 +1,13 @@
+{
+  "target_roles": ["Accountant", "Assistant Accountant", "Senior Accountant", "Accounts Payable", "Accounts Receivable", "Finance Executive", "Payroll", "WPS"],
+  "skills": ["Oracle", "Excel", "bank reconciliation", "accounts payable", "accounts receivable", "payroll", "WPS"],
+  "locations": ["Qatar", "Doha", "GCC"],
+  "preferred_keywords": ["finance", "accounting", "ERP"],
+  "timeout_seconds": 12,
+  "sources": [
+    {"name": "Arbeitnow public API", "url": "https://www.arbeitnow.com/api/job-board-api"},
+    {"name": "Remote OK public JSON", "url": "https://remoteok.com/api"},
+    {"name": "Jobicy public API", "url": "https://jobicy.com/api/v2/remote-jobs?count=50"},
+    {"name": "Remotive public API", "url": "https://remotive.com/api/remote-jobs?search=accountant"}
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "shortlist_threshold": 70,
+  "strong_match_threshold": 85,
+  "role_points": 40,
+  "skill_points": 30,
+  "location_points": 20,
+  "keyword_points": 10,
+  "auto_apply": false,
+  "owner_approval_required_for_submission": true,
+  "linkedin_credentials_allowed": false
+}

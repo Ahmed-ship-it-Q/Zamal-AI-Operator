@@ -1,0 +1,1 @@
+{"read_only_discovery": true, "telegram_credentials": "existing ZAMAL_TELEGRAM_TOKEN environment credential", "chat_id": "ZAMAL_TELEGRAM_CHAT_ID or safe getUpdates discovery", "linkedin": {"login": false, "password": false, "cookies": false, "session_reuse": false, "direct_scraping": false}, "auto_apply": false, "submission_requires_owner_approval": true}

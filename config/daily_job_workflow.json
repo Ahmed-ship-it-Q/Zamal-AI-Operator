@@ -1,0 +1,1 @@
+{"name": "Daily Personal Job Search", "schedule": "08:00", "timezone": "local Mac time", "steps": ["job search", "preserve/fallback results", "shortlist", "Telegram notification"], "auto_apply": false, "owner_approval_required_for_submission": true, "execution_owner": "macOS LaunchAgent", "n8n_execute_command": false}
