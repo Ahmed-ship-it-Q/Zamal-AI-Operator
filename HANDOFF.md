@@ -69,6 +69,9 @@ Do not assume external account actions are LIVE unless separately authenticated 
 7. LinkedIn only if an authorized supported integration exists.
 
 ## Continuation Rule For Any Agent
+Before substantial work, read and follow `AI_EXECUTION_STANDARD.md`.
+Use: PREFLIGHT → INSPECT → EXECUTE → TEST → FIX → VERIFY → CHECKPOINT.
+Choose the matching task formula, keep context/token usage minimal, and read only task-relevant files.
 Inspect current files first.
 Do not restart or rewrite completed work.
 Do not add unrelated features.
