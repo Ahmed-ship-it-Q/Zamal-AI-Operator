@@ -1,6 +1,7 @@
 # AI Execution Standard
 
 Use this standard for ChatGPT, Claude, Codex, Gemini, Copilot, and other approved agents.
+Also follow `knowledge/AUTONOMY_APPROVAL_POLICY.md` for access, autonomy, Telegram approval, protected final actions, and delete/private-data boundaries.
 
 ## Default Workflow
 PREFLIGHT → INSPECT → EXECUTE → TEST → FIX → VERIFY → CHECKPOINT
@@ -19,11 +20,21 @@ If something is missing, try one safe alternative. Do not repeat the same failed
 - Reuse existing architecture and working components.
 - Prefer the smallest correct change; do not rewrite working systems unnecessarily.
 - Complete the task end-to-end: implement, test, fix, and verify.
-- Solve routine issues autonomously; ask only when genuinely blocked.
+- Solve routine issues autonomously; ask only when genuinely blocked or when a protected final action reaches its approval boundary.
+- The owner supplies intent and approval; the Operator handles planning, model/tool selection, execution, recovery, verification, and completion.
+- Do not require the owner to manually relay prompts between approved agents or perform routine browser/computer steps when an authorized capability exists.
+- After APPROVE, execute the approved final action, verify the result, log evidence, and report completion.
 - Never weaken security/safety or expose secrets.
 - Never claim success without evidence.
-- Do not commit, push, merge, deploy, pay, submit externally, or make irreversible/security-sensitive changes without explicit approval.
+- Do not commit, push, merge, deploy, pay, submit externally, send, publish, delete, or make irreversible/security-sensitive changes without the required explicit approval.
 - Keep context and output compact to conserve token/credit usage.
+
+## Access and mutation baseline
+- Approved working scope: perform task-relevant work autonomously within capability boundaries.
+- Read-only scope: inspect only; no edit/delete/move/rename/forward/upload/share.
+- Private/denied scope: deny by default unless narrowly and explicitly authorized for a specific task.
+- Deletion is deny-by-default and requires a fresh explicit approval immediately before execution.
+- Approval never overrides emergency stop, project-specific read-only rules, provider safety checks, or denied capabilities.
 
 ## Six task formulas
 
@@ -33,7 +44,7 @@ Preflight → understand architecture → establish minimal source-of-truth → 
 
 ### 2. HIGH-AUTONOMY EXECUTION
 Use for normal implementation work.
-Goal → inspect → implement → test → fix → verify → finish.
+Goal → inspect → implement → test → fix → verify → protected-final-action approval if needed → finish.
 
 ### 3. ROOT-CAUSE REPAIR
 Use when something is broken.
@@ -63,6 +74,7 @@ A task is DONE only when:
 - relevant tests/checks pass;
 - the affected area shows no discovered regression;
 - the final state is verified with evidence;
+- any required protected-action approval was correctly enforced and, after approval, the Operator completed and verified the action;
 - the checkpoint/handoff is updated when continuity requires it.
 
 ## Default final report
