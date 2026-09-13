@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "updated_at": "2026-09-11T23:13:44.814162+00:00",
+  "updated_at": "2026-09-12T16:39:23.726838+00:00",
   "scope": "Sanitized cloud verification of requested expansion; not a 99-percent readiness claim",
   "capabilities": [
     {
@@ -26,44 +26,79 @@
     {
       "name": "Gemini",
       "status": "LIVE_VERIFIED",
-      "verified_scope": "Prior real planner/coder/verifier handoff; not reinvoked in this continuation",
+      "verified_scope": "Current real approved planner/coder/verifier handoff succeeded through n8n-owned credential. Canonical context, replay denial and restart persistence verified.",
       "evidence": [
         {
-          "path": "outbox/2026-09-09/phase4-gemini/live-verification-c611b597-dbda-4028-ae14-edfde9ccf512.json",
-          "sha256": "9936d8aa5a08878781c020c1ece6f5a8a77b5ab52d0146ce60d7f83bd7db87be"
+          "path": "outbox/2026-09-12/provider-step1/handoff.json",
+          "sha256": "13e900bf5f45565668f86e369f0755610cfbe55e613cc5f50bc4d427fa92a27e"
         }
       ],
       "owner_action": null
     },
     {
       "name": "Claude",
-      "status": "BLOCKED",
-      "verified_scope": "Host subscription authenticated previously; restrictive sandbox cannot authenticate; adapter dormant",
-      "evidence": [],
-      "owner_action": "No action requested in this continuation; do not broaden private-data permissions"
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "CLI 2.1.112 subscription via existing memory-only credential bridge; isolated three-stage planner/coder/verifier handoff succeeded with tools/hooks/MCP disabled, bounded low effort, literal macOS resolver access, canonical results, approval/replay and restart verified. Production registry activated only after successful live verification.",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-12/provider-repair/claude-live-94eeca0d-17ac-4631-a1cc-7650bc796287.json",
+          "sha256": "ae23da74313195c18100de5fe0b5ca5e1613d5d8ccb06dc99fe12f237de52107"
+        },
+        {
+          "path": "outbox/2026-09-12/provider-repair/production-routing.json",
+          "sha256": "5f99445729be6851bdf4b67748d2690fb6bb7e23f62a4792807290e000944089"
+        },
+        {
+          "path": "outbox/2026-09-12/provider-repair/isolation.json",
+          "sha256": "d6a0f381137635bf3dfc1290f66202b25f7fc95721daaedf36dfad43cca5a9b9"
+        },
+        {
+          "path": "outbox/2026-09-12/provider-repair/credential-privacy.json",
+          "sha256": "0c46c71064ef97427b37da68eded9f58009e141c6a8a51576a0159d7c64eacf2"
+        }
+      ],
+      "owner_action": null
     },
     {
       "name": "Codex",
-      "status": "BLOCKED",
-      "verified_scope": "Unchanged unified_exec safety preflight; no bypass",
-      "evidence": [],
-      "owner_action": "Future runtime satisfying existing safety contract"
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "0.149.0 standalone binary via ChatGPT subscription OAuth (id_token/access_token/refresh_token; no paid API key required). All 24 DISABLED features including unified_exec correctly report false. Live planner inference verified: context_id/hash match, canonical fields present, no tools executed. Root cause of prior failure: Codex 0.149.0 emits item.type='error' (informational: code_mode_host disabled by safety switch) before agent_message; safety filter updated to allow 'error' items while still denying all other unexpected types. Routing: Codex selected primary for coder stage; Claude primary for planner/verifier. 924/924 regression pass.",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-12/provider-repair/codex-current.json",
+          "sha256": "bd8837ddb72a5c1b92c533e15998bba093c7519965aa3a8c8f15d8c2e3cfd90e"
+        },
+        {
+          "path": "outbox/2026-09-13/codex-step1/safety-contract.json",
+          "sha256": "9e5a76a8fd05d4fd9b0790dde1d46603e42d58ffb0a3f4198e9cafc3f0535489"
+        }
+      ],
+      "owner_action": null
     },
     {
       "name": "OpenAI",
       "status": "AVAILABLE_NOT_ACTIVE",
-      "verified_scope": "Paid adapter dormant; not required or invoked",
-      "evidence": [],
+      "verified_scope": "Existing n8n binding is locally readable; paid inference remains explicitly dormant. Prior HTTP 429 is historical and was not retried; current live availability not established.",
+      "evidence": [
+        {
+          "path": "outbox/2026-09-12/provider-step1/preflight.json",
+          "sha256": "2cced8174d4a1b0322e110fa150db0710a68c35e1d24e5966c28c0a85c2688af"
+        }
+      ],
       "owner_action": null
     },
     {
       "name": "Provider Router",
       "status": "LIVE_VERIFIED",
-      "verified_scope": "Prior deterministic Gemini handoff and canonical context; uncertainty never auto-retries",
+      "verified_scope": "Existing deterministic production router binds verified Claude; Gemini fallback remains available; policy-forbidden fallback denied, OpenAI dormant, Codex fail-closed. Pending/wrong approval and completed/uncertain replay denied; restart binding and results persist.",
       "evidence": [
         {
-          "path": "outbox/2026-09-09/phase4-gemini/live-verification-c611b597-dbda-4028-ae14-edfde9ccf512.json",
-          "sha256": "9936d8aa5a08878781c020c1ece6f5a8a77b5ab52d0146ce60d7f83bd7db87be"
+          "path": "outbox/2026-09-12/provider-repair/production-routing.json",
+          "sha256": "5f99445729be6851bdf4b67748d2690fb6bb7e23f62a4792807290e000944089"
+        },
+        {
+          "path": "outbox/2026-09-12/provider-repair/focused-tests.log",
+          "sha256": "49806f819b44c524b39200d489a1d0eb174fd1697100c0e6928405137921d5d8"
         }
       ],
       "owner_action": null
@@ -138,7 +173,10 @@
           "sha256": "71d4a5f3cf9f8ec6abdd5288b4deb5e874a8c965992e8c23e45f1a776936fea0"
         }
       ],
-      "owner_action": null
+      "owner_action": null,
+      "verification": "Personal Qatar job search verified with public-source discovery, match/shortlist logic, fallback preservation, daily macOS scheduling at 08:00, and live Telegram delivery.",
+      "auto_apply": false,
+      "submission": "OWNER_APPROVAL_REQUIRED"
     },
     {
       "name": "LinkedIn Connector",
@@ -197,10 +235,11 @@
     },
     {
       "name": "Telegram",
-      "status": "CONNECTED",
+      "status": "LIVE_VERIFIED",
       "verified_scope": "Prior documented getMe connection and completed Phase 11 preserved; not re-probed in this continuation",
       "evidence": [],
-      "owner_action": null
+      "owner_action": null,
+      "verification": "Live Telegram delivery verified from local Zamal AI Operator runtime."
     },
     {
       "name": "Voice/STT",
@@ -216,8 +255,8 @@
     },
     {
       "name": "Mac Operations",
-      "status": "AVAILABLE_NOT_ACTIVE",
-      "verified_scope": "Scoped worker preserved and regression-tested; no desktop or application control activated",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Phase 6 Mac worker live-verified 2026-09-09: allowed-folder resolve, allowed-command (git_status) execution, service_status without approval, browser_open localhost, permission_check reported; private-path/traversal/symlink/CPC-write denied at validate time; approval-gate enforced for service_start. 39 Mac Safety tests + 853/853 full regression pass. See ROADMAP_STATE.md MAC SAFETY OPERATIONS section.",
       "evidence": [],
       "owner_action": null
     },
@@ -307,8 +346,8 @@
     },
     {
       "name": "Emergency Stop",
-      "status": "AVAILABLE_NOT_ACTIVE",
-      "verified_scope": "Latched controls preserved and adversarially tested; global emergency state not changed in production",
+      "status": "LIVE_VERIFIED",
+      "verified_scope": "Latched controls live-tested 2026-09-09: epoch incremented 1→2, all Mac dispatch blocked during stop, Denied raised as expected; resume restored normal operation; control_audit append-only trigger verified. Global emergency state returned all-OFF after test. See ROADMAP_STATE.md MAC SAFETY OPERATIONS section.",
       "evidence": [],
       "owner_action": null
     },

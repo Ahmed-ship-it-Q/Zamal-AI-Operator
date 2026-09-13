@@ -14,6 +14,7 @@ NODE=Path(shutil.which(os.environ.get('ZAMAL_NODE') or 'node') or '')
 BRIDGE=Path(__file__).with_name('gemini_bridge.cjs')
 
 class GeminiTextTransport:
+    safe_errors = frozenset()
     def __init__(self, base=None):
         self.base=Path(base or BRIDGE.parent.parent).resolve()
         self.binding=None
@@ -72,7 +73,7 @@ class GeminiTextTransport:
             if code:
                 reason=result.get('transport_error','gemini_transport_failed')
                 # Only fixed error codes emitted by the trusted bridge are surfaced.
-                if reason not in {'provider_http_'+str(n) for n in (400,401,403,404,429,500,502,503,504)}:reason='gemini_transport_failed'
+                if reason not in self.safe_errors | {'provider_http_'+str(n) for n in (400,401,403,404,429,500,502,503,504)}:reason='gemini_transport_failed'
                 raise ProviderUncertain(reason+'; no automatic retry')
             return result
         finally:

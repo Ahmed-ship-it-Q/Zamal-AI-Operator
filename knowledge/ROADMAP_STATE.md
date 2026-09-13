@@ -714,6 +714,113 @@ Verification 2026-09-09:
   and Phase 5 Voice STT remain unchanged. No real CPC writes, deploy, commit, push,
   merge, reset or revert. No Phase 14 local-scope blockers.
 
+## MAC SAFETY OPERATIONS — VERIFIED 2026-09-09
+
+Standalone verification of Phase 6 Mac worker safety properties and Emergency Stop.
+Uses existing architecture — no new modules, no new schema, no CPC/commit/push.
+
+- GREEN: allowed safe action — `service_status` executes without approval; action status SUCCEEDED.
+  Live: n8n running=True, port=5678 confirmed via production DB.
+- GREEN: private-path denial — `~/.ssh/id_rsa`, `~/Desktop`, `~/.env`, `state/operator.sqlite3`
+  all denied by FolderPolicy at validate time, before any execution or DB write.
+  Deny-by-default: only `operator_root`, `operator_outbox`, `operator_inbox`, `cpc_root` allowed.
+  `state/`, `.env`, `.ssh`, `*.sqlite3`, `token*`, `secret*` explicitly blocked by component rules.
+- GREEN: approval-required action — `service_start` stops at PENDING; cannot execute without APPROVE.
+  Unknown/unapproved services denied by MacWorker.validate() deny-by-default.
+- GREEN: emergency stop — `stop_everything=True` blocks all Mac ops dispatch (SAFE and PROTECTED).
+  Live: epoch incremented from 1 → 2; blocked action raised Denied as expected.
+- GREEN: blocked execution — queued SAFE action blocked mid-flight; action remains PENDING (not corrupted).
+  Epoch latch: toggle ON/OFF between claim and dispatch increments epoch and raises at dispatch.
+- GREEN: resume — `stop_everything=False` restores normal operation; new proposals execute.
+  Live: stop cleared (epoch=2, flag=0); subsequent test confirms operations available.
+- GREEN: evidence logging — `control_audit` records every flag change: actor, reason, timestamp.
+  Append-only trigger blocks DELETE and UPDATE at DB level. Log persists across restart.
+  Live audit: stop (actor='zamal-live-test', reason='Mac safety live verification') and
+  resume (reason='Mac safety live verification — resume') both recorded.
+
+Tests: `tests/test_mac_safety.py` — 39 tests across 6 classes:
+AllowedSafeActionTests, PrivatePathDenialTests, ApprovalRequiredTests,
+EmergencyStopTests, ResumeAfterStopTests, EvidenceLoggingTests, FullCycleTests.
+
+Full regression 2026-09-09: **853/853 PASS** (727 prior + 39 new Mac Safety + 87 existing Mac/Phase 6 net).
+No CPC writes, no commit, no push, no provider changes. Production controls remain all-OFF after test.
+
+## JOB AUTO-APPLY / BROWSER WORKER — VERIFIED 2026-09-12
+
+**Current Step 3 live E2E status: BLOCKED (2026-09-12).** The implementation/test
+results below do not establish a real employer application submission. Current
+records contain synthetic test applications; `config/candidate.json` is absent.
+A real selected job URL and CV are still required. Browser opening exists, but
+browser form filling/upload automation does not. The existing unauthenticated
+Greenhouse `/applications` POST is not the documented authenticated Job Board
+submission contract; an applicant browser session cannot supply employer API
+authorization. No live submission or Telegram application approval was sent.
+
+Continuation repairs: job fixtures now explicitly pass their temporary database
+to `Store`; Telegram job submission decisions dispatch through the existing
+`JobApplicationWorker` Gate. Focused Job Application/Telegram tests: **90/90 PASS**.
+Current full regression: **903/903 PASS**. Mock HTTP success remains test evidence
+only. Evidence: `outbox/2026-09-12/step1-step3/status.json`.
+
+Step 1 Codex: **BLOCKED_EXTERNAL**. No genuinely new compatible installation was
+found; known unsafe runtimes were not retried. Prior Claude/Gemini verification
+and the dormant OpenAI configuration remain preserved.
+
+End-to-end job application flow with Telegram approval gate. Reuses existing architecture.
+No new modules beyond `zamal_core/job_app.py`. No CPC writes, no commit, no push.
+
+**New file: `zamal_core/job_app.py`** (~670 lines)
+- `job_app_open` (SAFE): opens job board URL in system browser; domain allowlist enforced
+- `job_app_plan` (SAFE): creates `job_applications` record; links to biz_jobs result; returns gaps
+- `job_app_preflight` (SAFE): validates candidate.json, CV file, board support, outbox containment
+- `job_app_status` (SAFE): returns current application record
+- `job_app_submit` (PROTECTED): Telegram APPROVE required; Greenhouse API only; stdlib urllib multipart POST
+- `migrate_job_app`: idempotent, core_extensions v1, append-only audit triggers
+- `JobBrowserPolicy`: domain allowlist (`boards.greenhouse.io`, `jobs.greenhouse.io`, `jobs.lever.co`,
+  `app.lever.co`, `jobs.ashbyhq.com`); no credential URLs, HTTPS only
+- `GreenhouseSubmitter`: public multipart/form-data POST; stdlib only; candidate contact from
+  `config/candidate.json` only at submit time (never in payload); outbox file containment enforced
+- `JobAppCapability`: always overrides `run_with_controls` → Denied; forces canonical `run_with_action`
+
+**Modified: `zamal_core/store.py`**
+- `Policy.SAFE`: added `job_app_open`, `job_app_plan`, `job_app_preflight`, `job_app_status`
+- `Policy.requires_approval()`: `job_app_` prefix check before generic PROTECTED lookup
+- `Gate.propose()`: calls `validate_job_app` for `job_app_` kinds
+- `Store.__init__()`: calls `migrate_job_app`
+
+**Modified: `zamal_core/safety.py`**
+- `READ_ONLY`: added `job_app_open`, `job_app_preflight`, `job_app_status`
+- `EXTERNAL`: added `job_app_submit` (blocked by `pause_external_actions`)
+
+**Modified: `zamal_core/approval_contract.py`**
+- `records()`: binds `job_applications` record into approval contract material when `application_id` in payload
+
+**Modified: `zamal_core/__main__.py`**
+- `job-status --id` and `job-open --url --board-type` CLI commands
+- `execute`, `propose`, `resolve-approval` dispatch branches for `job_app_` prefix
+
+**Safety properties verified:**
+- Deny-by-default: unknown/unsupported boards (Lever, Ashby) fail safely → BLOCKED; no HTTP call
+- No-submit-before-approval: execute without APPROVE raises Denied
+- Replay denial: second execute on consumed approval raises Denied; re-submit on 'submitted' app raises Conflict
+- Emergency stop: `stop_everything` blocks all job_app kinds including SAFE; `pause_external_actions` blocks submit
+- Private-path denial: `..` traversal, hidden files, absolute paths outside outbox all denied
+- Candidate privacy: contact info read from `config/candidate.json` only at submit time; never in payload
+- Approval contract binding: `job_applications` record state bound at decision time; bait-and-switch prevented
+- Evidence: `job_app_audit` append-only (UPDATE/DELETE trigger blocked); `response_hash` persisted
+- `acknowledge_gaps=false` denied at validate/propose time; boolean required
+- `config/candidate.json` missing or incomplete → Denied at submit time
+
+**Tests: `tests/test_job_app.py`** — 46 tests across 10 classes:
+MigrationTests (5), ValidationTests (8), ApprovalBindingTests (4),
+NoSubmitBeforeApprovalTests (2), PostApprovalContinuationTests (2),
+ReplayDenialTests (2), EmergencyStopTests (3), EvidenceLoggingTests (4),
+PrivatePathDenialTests (3), UnsupportedBoardTests (3), CandidateJsonMissingTests (2),
+MultipartTests (3), BrowserPolicyTests (5).
+
+Full regression 2026-09-12: **902/902 PASS** (853 prior + 46 new job_app + 3 additional).
+No CPC writes, no commit, no push, no provider changes. Production controls remain all-OFF after test.
+
 ## Evidence and preserved foundation
 
 - `python3 -m unittest discover -s tests -v`: **431 tests passed**, 2026-09-08.

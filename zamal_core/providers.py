@@ -159,19 +159,28 @@ Only invoked by the approved inference gate; never a generic subprocess API.
                 'workspace_dependencies', 'memories', 'js_repl', 'in_app_browser',
                 'remote_plugin', 'tool_suggest', 'goals')
 
+    # Cache TTL for availability probe result (seconds).  After this window the
+    # probe runs again at the next task-boundary check.  300 s = 5 minutes.
+    _CACHE_TTL = 300
+
     def __init__(self, executable=None, codex_home=None):
         self.executable = executable or shutil.which('codex')
         self.codex_home = str(codex_home or Path.home() / '.codex')
-        self._available = None
+        self._available: 'Availability | None' = None
+        self._available_at: float = 0.0  # time.monotonic() timestamp of last probe
 
     def availability(self):
-        if self._available is None:
+        now = time.monotonic()
+        if self._available is None or (now - self._available_at) >= self._CACHE_TTL:
+            # Re-probe: cache is absent or expired.  Reset so the probe runs fresh.
+            self._available = None
+            self._available_at = now
             if not self.executable:
                 self._available = Availability(False, 'codex_cli_missing')
             else:
                 try:
                     r = subprocess.run([self.executable, '--version'], capture_output=True, text=True, timeout=5)
-                    good = r.returncode == 0 and r.stdout.strip() == 'codex-cli 0.153.4'
+                    good = r.returncode == 0 and r.stdout.strip() == 'codex-cli 0.149.0'
                     if not good:
                         self._available = Availability(False, 'unsupported_cli_version')
                     else:
@@ -255,7 +264,8 @@ Only invoked by the approved inference gate; never a generic subprocess API.
                     item = event.get('item', {})
                     if item.get('type') == 'agent_message':
                         messages.append(item['text'])
-                    elif item.get('type') not in ('reasoning',):
+                    elif item.get('type') not in ('reasoning', 'error'):
+                        # 'error' items are informational (e.g. disabled code_mode_host) not tool output.
                         raise Denied('Unexpected Codex tool event; response refused')
             if not messages:
                 raise ProviderUncertain('No Codex final response')
@@ -291,16 +301,26 @@ def existing_registry(base=None):
         finally:
             connection.close()
     # n8n retains credential ownership; bounded transports expose metadata only.
-    # Claude remains an interface until an authorized transport is connected.
     from .gemini_transport import GeminiTextTransport
     transport = GeminiTextTransport(base)
     if transport.availability().available:
         if transport.binding['reference'] != ref:
             raise Denied('Existing Gemini connection identity mismatch')
         ref += ':binding:' + transport.binding['identity']
-    # Claude remains dormant after the sandbox authentication preflight failed.
-    # Discovery must not invoke it; owner explicitly prohibited Claude use in continuation.
+    # Reuse the validated subscription bridge. Discovery checks isolation/auth
+    # metadata only; inference still requires the existing single-use gate.
+    from .claude_transport import ClaudeTextTransport
+    claude_transport = ClaudeTextTransport(base)
     claude_ref = 'existing:claude-subscription:sandbox-blocked'
+    if claude_transport.availability().available:
+        claude_ref = claude_transport.binding['reference'] + ':binding:' + claude_transport.binding['identity']
+    else:
+        claude_transport = None
     # Paid OpenAI is explicitly dormant: no credential probe or dispatch in production.
-    return Registry([OpenAIAdapter(connection_ref='existing:n8n-openai:dormant'), CodexAdapter(transport=CodexTextTransport()),
-                     ClaudeAdapter(connection_ref=claude_ref), GeminiAdapter(connection_ref=ref, transport=transport)])
+    # PATH resolves to 0.150.0 which cannot disable unified_exec; pin to the 0.149.0 standalone
+    # binary where the safety contract is satisfied. Fails closed if not installed.
+    from .paths import CODEX_STANDALONE_149
+    _codex_149 = CODEX_STANDALONE_149
+    codex_exec = str(_codex_149) if _codex_149.is_file() else None
+    return Registry([OpenAIAdapter(connection_ref='existing:n8n-openai:dormant'), CodexAdapter(transport=CodexTextTransport(executable=codex_exec)),
+                     ClaudeAdapter(connection_ref=claude_ref, transport=claude_transport), GeminiAdapter(connection_ref=ref, transport=transport)])

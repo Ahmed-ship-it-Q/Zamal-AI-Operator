@@ -146,6 +146,12 @@ def main():
     p.add_argument('--since-hours', type=float, default=None)
     p = sub.add_parser('automation-list')
     p.add_argument('--status', default=None)
+    # Job application
+    p = sub.add_parser('job-status')
+    p.add_argument('--id', required=True)
+    p = sub.add_parser('job-open')
+    p.add_argument('--url', required=True)
+    p.add_argument('--board-type', required=True)
     args = parser.parse_args()
     s = Store()
     try:
@@ -172,7 +178,10 @@ def main():
             action_kind = s.action(args.id)['kind']
             from .gateway import GatewayWorker, _PHASE10_KINDS
             from .personal_ops import PersonalOpsWorker, _PHASE14_KINDS
-            if action_kind.startswith('biz_'):
+            if action_kind.startswith('job_app_'):
+                from .job_app import JobApplicationWorker
+                result = JobApplicationWorker(s).gate().execute(args.id)
+            elif action_kind.startswith('biz_'):
                 from .business_ops import BusinessWorker
                 result = BusinessWorker(s).gate().execute(args.id)
             elif action_kind in _PHASE14_KINDS:
@@ -213,7 +222,12 @@ def main():
             from .gateway import GatewayWorker
             from .personal_ops import PersonalOpsWorker
             from .business_ops import BusinessWorker
-            gate = BusinessWorker(s).gate() if action['kind'].startswith('biz_') else HandoffEngine(s, existing_registry()).gate() if action['kind'] == 'ai_inference' else (PersonalOpsWorker(s).gate() if action['kind'].startswith('ops_') else GatewayWorker(s).gate())
+            from .job_app import JobApplicationWorker
+            gate = (JobApplicationWorker(s).gate() if action['kind'].startswith('job_app_')
+                    else BusinessWorker(s).gate() if action['kind'].startswith('biz_')
+                    else HandoffEngine(s, existing_registry()).gate() if action['kind'] == 'ai_inference'
+                    else PersonalOpsWorker(s).gate() if action['kind'].startswith('ops_')
+                    else GatewayWorker(s).gate())
             result = gate.resolve_approval(args.id, args.choice, task_id=args.task_id, action_id=args.action_id, actor='local-os:' + getpass.getuser(), note=args.note)
         elif args.command == 'approvals':
             result = s.approval_queue()
@@ -230,7 +244,11 @@ def main():
             from .gateway import GatewayWorker
             from .personal_ops import PersonalOpsWorker
             from .business_ops import BusinessWorker
-            worker = BusinessWorker(s) if args.kind.startswith('biz_') else PersonalOpsWorker(s) if args.kind.startswith('ops_') else GatewayWorker(s)
+            from .job_app import JobApplicationWorker
+            worker = (JobApplicationWorker(s) if args.kind.startswith('job_app_')
+                      else BusinessWorker(s) if args.kind.startswith('biz_')
+                      else PersonalOpsWorker(s) if args.kind.startswith('ops_')
+                      else GatewayWorker(s))
             result = worker.gate().propose(args.id, args.kind, json.loads(args.payload), args.key)
         elif args.command == 'decide':
             result = s.decide(args.id, args.choice, actor='local-os:' + getpass.getuser(), note=args.note)
@@ -323,6 +341,16 @@ def main():
         elif args.command == 'automation-list':
             from .automation import AutomationEngine
             result = AutomationEngine(s).list_proposals(status=args.status)
+        elif args.command == 'job-status':
+            from .job_app import JobApplicationWorker
+            w = JobApplicationWorker(s)
+            row = s.db.execute('SELECT * FROM job_applications WHERE id=?', (args.id,)).fetchone()
+            result = dict(row) if row else {'error': 'not found'}
+        elif args.command == 'job-open':
+            from .job_app import JobApplicationWorker
+            w = JobApplicationWorker(s)
+            result = w._browser.open(args.url)
+            result['board_type'] = args.board_type
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0
     except (ValueError, Conflict, Denied, IntakeError) as exc:

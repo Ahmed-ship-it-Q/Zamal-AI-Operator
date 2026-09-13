@@ -6,6 +6,7 @@ this module does not create, persist, export or print credentials.
 import hmac
 import json
 import os
+import signal
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from .store import Store, Denied
 from .gateway import InboundEventGateway
@@ -66,4 +67,15 @@ def serve(path, port=8788):
     if len(secret)<32: raise Denied('Gateway credential not configured')
     if not 1024<=port<=65535: raise Denied('Invalid gateway port')
     with HTTPServer(('127.0.0.1',port),handler_for(path,secret)) as server:
+        # Graceful shutdown on SIGTERM and SIGINT.
+        # server.shutdown() is thread-safe and stops serve_forever()'s select loop.
+        # Emergency Stop and in-flight request handling are not weakened: signals
+        # are only handled here in the main serve() call, not in the request handler.
+        def _shutdown(signum, frame):
+            # Run in a daemon thread so the signal handler returns immediately.
+            import threading
+            t = threading.Thread(target=server.shutdown, daemon=True)
+            t.start()
+        signal.signal(signal.SIGTERM, _shutdown)
+        signal.signal(signal.SIGINT, _shutdown)
         server.serve_forever()

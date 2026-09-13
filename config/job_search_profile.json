@@ -1,7 +1,7 @@
 {
   "target_roles": ["Accountant", "Assistant Accountant", "Senior Accountant", "Accounts Payable", "Accounts Receivable", "Finance Executive", "Payroll", "WPS"],
   "skills": ["Oracle", "Excel", "bank reconciliation", "accounts payable", "accounts receivable", "payroll", "WPS"],
-  "locations": ["Qatar", "Doha", "GCC"],
+  "locations": ["Qatar", "Doha", "GCC", "Gulf", "Riyadh", "Dubai", "Abu Dhabi", "Muscat", "Kuwait", "Bahrain"],
   "preferred_keywords": ["finance", "accounting", "ERP"],
   "timeout_seconds": 12,
   "sources": [

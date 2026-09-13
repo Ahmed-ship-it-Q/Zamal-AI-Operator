@@ -13,7 +13,7 @@ from .store import Denied, digest
 from .safety import Controls
 
 ROOT = Path(__file__).resolve().parents[1]
-NODE = Path('/Users/book/.nvm/versions/node/v22.23.2/bin/node')
+from .paths import NODE_BIN as NODE
 NAME = 'Zamal Operator Gateway'
 
 

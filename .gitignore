@@ -14,3 +14,23 @@ node_modules/
 .claude/
 .aider*
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Databases
+*.sqlite3
+*.sqlite
+*.db
+
+# Audio test artifacts
+*.aiff
+*.wav
+
+# Empty marker file
+system
+
+# CPC path reference (environment-specific)
+config/cpc_project_path.txt

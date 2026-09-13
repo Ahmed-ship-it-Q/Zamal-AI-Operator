@@ -72,7 +72,9 @@ class Policy:
                       # Phase 12: read-only monitor/security/usage actions
                       'monitor_sweep', 'security_audit', 'usage_summary', 'output_list',
                       # Phase 13: read-only automation observation and listing
-                      'automation_observe', 'automation_list'})
+                      'automation_observe', 'automation_list',
+                      # Job application: read-only open/plan/preflight/status
+                      'job_app_open', 'job_app_plan', 'job_app_preflight', 'job_app_status'})
     PROTECTED = frozenset({'email_send', 'job_submit', 'profile_mutate', 'git_push',
                            'git_merge', 'deploy', 'delete', 'git_reset', 'git_revert',
                            'payment', 'credential_change', 'security_change',
@@ -101,6 +103,10 @@ class Policy:
             from .personal_ops import _PHASE14_SAFE, _PHASE14_PROTECTED
             if kind in _PHASE14_PROTECTED: return True
             if kind in _PHASE14_SAFE: return False
+        if isinstance(kind, str) and kind.startswith('job_app_'):
+            from .job_app import JOB_APP_SAFE, JOB_APP_PROTECTED
+            if kind in JOB_APP_PROTECTED: return True
+            if kind in JOB_APP_SAFE: return False
         if kind == 'git_commit':
             return self.protect_commits
         if kind in self.PROTECTED:
@@ -290,6 +296,8 @@ class Store:
         migrate_automation(self)
         from .personal_ops import migrate_personal_ops
         migrate_personal_ops(self)
+        from .job_app import migrate_job_app
+        migrate_job_app(self)
 
     def close(self):
         self.db.close()
@@ -486,6 +494,9 @@ class Gate:
         if isinstance(kind,str) and kind.startswith('ops_'):
             from .personal_ops import validate_proposal
             validate_proposal(kind,payload,self.store.task(task_id)['project'])
+        if isinstance(kind,str) and kind.startswith('job_app_'):
+            from .job_app import validate_job_app
+            validate_job_app(kind,payload,self.store.task(task_id)['project'])
         if not isinstance(payload, dict) or not isinstance(request_key, str) or not request_key.strip():
             raise ValueError('Structured payload and request_key required')
         if not isinstance(ttl_seconds, (int, float)) or not 0 < ttl_seconds <= 604800:

@@ -29,10 +29,8 @@ from .safety import Controls
 from .worker import LocalWorker, Capability, redact, MAX_OUTPUT
 
 # ── Root paths (trusted startup, never from payload) ──────────────────────────
-
-OPERATOR_ROOT = Path('/Users/book/zamal-ai-operator').resolve()
-CPC_ROOT = Path('/Users/book/Desktop/AI-GROCERY-DECISION-PLATFORM').resolve()
-NODE_BIN = Path.home() / '.nvm/versions/node/v22.23.2/bin/node'
+# Imported from centralized paths module; never hardcode user-specific strings here.
+from .paths import OPERATOR_ROOT, CPC_ROOT, NODE_BIN
 
 # ── Folder policy ─────────────────────────────────────────────────────────────
 

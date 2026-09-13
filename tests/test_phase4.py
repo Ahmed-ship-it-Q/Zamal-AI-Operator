@@ -424,7 +424,7 @@ class Phase4Tests(unittest.TestCase):
         executable = self.root / 'fixture-codex'
         executable.write_text('#!' + sys.executable + '\n' +
             'import json,sys\n' +
-            'if "--version" in sys.argv: print("codex-cli 0.153.4"); sys.exit()\n' +
+            'if "--version" in sys.argv: print("codex-cli 0.149.0"); sys.exit()\n' +
             'raw=sys.stdin.read(); request=json.loads(raw[raw.index("{ "):] if "{ " in raw else raw[raw.index("{"):])\n' +
             'result={"context_id":request["context"]["context_id"],"context_hash":request["context_hash"],"stage":request["stage"],"summary":"fixture","proposals":[],"evidence_references":[],"next_action":"review"}\n' +
             'print(json.dumps({"type":"item.completed","item":{"type":"agent_message","text":json.dumps(result)}}))\n')
@@ -452,7 +452,7 @@ class Phase4Tests(unittest.TestCase):
 
     def test_codex_availability_requires_version_and_effective_safety_features(self):
         from subprocess import CompletedProcess
-        version = CompletedProcess([], 0, 'codex-cli 0.153.4\n', '')
+        version = CompletedProcess([], 0, 'codex-cli 0.149.0\n', '')
         feature_text = '\n'.join(f'{name} stable false' for name in CodexTextTransport.DISABLED)
         safe = CompletedProcess([], 0, feature_text, '')
         transport = CodexTextTransport('/fixture/codex')
@@ -470,9 +470,39 @@ class Phase4Tests(unittest.TestCase):
             self.assertFalse(transport.availability().available)
             self.assertEqual(probe.call_count, 1)
 
+    def test_codex_informational_error_event_allowed_before_agent_message(self):
+        # Real subprocess, fake executable. Emits error then agent_message — matches live 0.149.0 output
+        # when code_mode_host is disabled. The error event must be accepted (not Denied).
+        executable = self.root / 'fixture-codex-err'
+        executable.write_text('#!' + sys.executable + '\n' +
+            'import json,sys\n' +
+            'if "--version" in sys.argv: print("codex-cli 0.149.0"); sys.exit()\n' +
+            'raw=sys.stdin.read(); request=json.loads(raw[raw.index("{ "):] if "{ " in raw else raw[raw.index("{"):])\n' +
+            'result={"context_id":request["context"]["context_id"],"context_hash":request["context_hash"],"stage":request["stage"],"summary":"fixture","proposals":[],"evidence_references":[],"next_action":"ok"}\n' +
+            'print(json.dumps({"type":"item.completed","item":{"type":"error","message":"Code Mode is unavailable because code-mode host is disabled."}}))\n' +
+            'print(json.dumps({"type":"item.completed","item":{"type":"agent_message","text":json.dumps(result)}}))\n')
+        executable.chmod(0o700)
+        adapter = CodexAdapter(transport=CodexTextTransport(str(executable), str(self.root)))
+        snap = self.bus.snapshot(self.t['id'])
+        with patch.object(adapter.transport, 'availability', return_value=Availability(True, 'fixture_ready')):
+            result = adapter.invoke(snap, 'planner', lambda: None)
+        self.assertEqual(result['summary'], 'fixture')
+    def test_codex_unexpected_item_type_still_denied(self):
+        executable = self.root / 'fixture-codex-bad'
+        executable.write_text('#!' + sys.executable + '\n' +
+            'import json,sys\n' +
+            'if "--version" in sys.argv: print("codex-cli 0.149.0"); sys.exit()\n' +
+            'sys.stdin.read()\n' +
+            'print(json.dumps({"type":"item.completed","item":{"type":"tool_call","name":"shell","args":"rm -rf /"}}))\n')
+        executable.chmod(0o700)
+        adapter = CodexAdapter(transport=CodexTextTransport(str(executable), str(self.root)))
+        snap = self.bus.snapshot(self.t['id'])
+        with patch.object(adapter.transport, 'availability', return_value=Availability(True, 'fixture_ready')):
+            with self.assertRaises(Denied):
+                adapter.invoke(snap, 'planner', lambda: None)
     def test_codex_missing_feature_and_probe_failure_fail_closed(self):
         from subprocess import CompletedProcess, TimeoutExpired
-        version = CompletedProcess([], 0, 'codex-cli 0.153.4\n', '')
+        version = CompletedProcess([], 0, 'codex-cli 0.149.0\n', '')
         for probe in (CompletedProcess([], 0, '', ''), CompletedProcess([], 1, '', '')):
             with self.subTest(probe=probe.returncode):
                 transport = CodexTextTransport('/fixture/codex')

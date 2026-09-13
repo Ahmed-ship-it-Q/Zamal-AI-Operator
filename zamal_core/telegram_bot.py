@@ -291,10 +291,17 @@ class TelegramMessageRouter:
 class TelegramCallbackHandler:
     """Handles inline keyboard callbacks. Directly invokes Phase 9 Gate."""
 
-    def __init__(self, store):
+    def __init__(self, store, cfg=None):
         self._s = store
+        self._cfg = cfg  # TelegramConfig; if provided, adds defence-in-depth chat_id check
 
     def handle(self, callback_query_id, chat_id, data):
+        # Defence-in-depth: re-verify chat_id against the operator allowlist even
+        # though process_update() already checked it.  This ensures the job-app
+        # approval callback boundary cannot be reached by an unauthorized sender
+        # even if the outer check is bypassed or handler is called directly.
+        if self._cfg is not None and not self._cfg.is_allowed(chat_id):
+            return failure('DENIED', 'unauthorized_sender')
         if not isinstance(data, str) or not data.startswith(_CALLBACK_PREFIX):
             return failure('DENIED', 'unknown_callback')
         rest = data[len(_CALLBACK_PREFIX):]
@@ -308,8 +315,12 @@ class TelegramCallbackHandler:
             return failure('DENIED', 'approval_not_found_or_expired')
         task_id = approval['task_id']
         action_id = approval['action_id']
-        from .gateway import GatewayWorker
-        gate = GatewayWorker(self._s).gate()
+        if self._s.action(action_id)['kind'] == 'job_app_submit':
+            from .job_app import JobApplicationWorker
+            gate = JobApplicationWorker(self._s).gate()
+        else:
+            from .gateway import GatewayWorker
+            gate = GatewayWorker(self._s).gate()
         actor = f'telegram:{chat_id}'
         note = 'Edit requested via Telegram' if choice == 'EDIT' else ''
         try:
@@ -339,7 +350,7 @@ class TelegramBot:
         # inbox = where Telegram files are stored; must match Intake's inbox path
         resolved_inbox = Path(inbox or tmp_dir or _DEFAULT_INBOX)
         self._router = TelegramMessageRouter(store, self._api, resolved_inbox)
-        self._callbacks = TelegramCallbackHandler(store)
+        self._callbacks = TelegramCallbackHandler(store, cfg=self._cfg)
 
     @property
     def configured(self):

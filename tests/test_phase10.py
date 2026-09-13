@@ -221,3 +221,145 @@ class Phase10Tests(unittest.TestCase):
         finally:self.s.db.execute('pragma query_only=off')
         again=self.events.receive('notification','n8n',{'text':'fixture'},'storage-failure')
         self.assertEqual(again['outcome'],'DUPLICATE');self.assertEqual(again['status'],'received')
+
+
+# ── L-5: SIGTERM/SIGINT graceful shutdown test ────────────────────────────────
+
+class WebhookSIGTERMTests(unittest.TestCase):
+    """The loopback webhook server must shut down cleanly on SIGTERM."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='zamal-sigterm-')
+        self.root = Path(self.tmp.name)
+        self.s = Store(self.root / 'store.db')
+
+    def tearDown(self):
+        self.s.close()
+        self.tmp.cleanup()
+
+    def test_sigterm_handler_calls_server_shutdown(self):
+        """The handler installed for SIGTERM must call server.shutdown() when invoked."""
+        import signal as _signal
+        import time as _time
+        import os as _os
+
+        secret = 'x' * 32
+        shutdown_called = []
+
+        class _FakeServer:
+            def __init__(self):
+                self._running = True
+            def serve_forever(self):
+                # Exits immediately to keep the test fast; we inspect the handlers below.
+                pass
+            def shutdown(self):
+                shutdown_called.append(True)
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+
+        installed_handlers = {}
+        original_signal = _signal.signal
+
+        def capturing_signal(signum, handler):
+            installed_handlers[signum] = handler
+            # Don't actually install on the OS so the test process is unaffected.
+
+        from zamal_core.webhook_gateway import serve as _serve
+
+        with patch('zamal_core.webhook_gateway.HTTPServer', return_value=_FakeServer()), \
+             patch.dict(_os.environ, {'ZAMAL_N8N_GATEWAY_SECRET': secret}), \
+             patch('zamal_core.webhook_gateway.signal.signal', side_effect=capturing_signal):
+            try:
+                _serve(self.root / 'store.db', port=18788)
+            except Exception:
+                pass
+
+        # The handler was registered; now invoke it directly (simulating OS delivery)
+        sigterm_handler = installed_handlers.get(_signal.SIGTERM)
+        self.assertIsNotNone(sigterm_handler,
+                             'serve() must register a SIGTERM handler')
+        sigterm_handler(_signal.SIGTERM, None)
+        # Give the daemon shutdown thread a moment to call server.shutdown()
+        import time as _time2
+        _time2.sleep(0.1)
+        self.assertTrue(shutdown_called,
+                        'SIGTERM handler must call server.shutdown()')
+
+    def test_serve_installs_signal_handlers(self):
+        """serve() must install SIGTERM and SIGINT handlers (verified via captured calls)."""
+        import signal as _signal
+
+        installed = {}
+
+        def capturing_signal(signum, handler):
+            installed[signum] = handler
+
+        secret = 'x' * 32
+        with patch('zamal_core.webhook_gateway.HTTPServer') as FakeHTTPServer, \
+             patch.dict(os.environ, {'ZAMAL_N8N_GATEWAY_SECRET': secret}), \
+             patch('zamal_core.webhook_gateway.signal.signal',
+                   side_effect=capturing_signal):
+            # Make the context-manager-wrapped server exit immediately
+            cm = FakeHTTPServer.return_value.__enter__.return_value
+            cm.serve_forever.return_value = None
+            from zamal_core.webhook_gateway import serve as _serve
+            try:
+                _serve(self.root / 'store.db', port=18789)
+            except Exception:
+                pass
+
+        self.assertIn(_signal.SIGTERM, installed,
+                      'serve() must install a SIGTERM handler')
+        self.assertIn(_signal.SIGINT, installed,
+                      'serve() must install a SIGINT handler')
+
+
+# ── L-4: Telegram callback chat_id defence-in-depth ──────────────────────────
+
+class TelegramCallbackAuthTests(unittest.TestCase):
+    """TelegramCallbackHandler must re-verify chat_id even with cfg provided."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='zamal-tg-auth-')
+        self.s = Store(Path(self.tmp.name) / 'store.db')
+
+    def tearDown(self):
+        self.s.close()
+        self.tmp.cleanup()
+
+    def test_callback_handler_blocks_unauthorized_chat_id_with_cfg(self):
+        """Handler with cfg must deny callbacks from non-allowed chat IDs."""
+        from zamal_core.telegram_bot import TelegramCallbackHandler, TelegramConfig
+
+        cfg = TelegramConfig.__new__(TelegramConfig)
+        cfg._token = 'fixture:token'
+        cfg._allowed = {'99999'}  # only this chat is allowed
+
+        handler = TelegramCallbackHandler(self.s, cfg=cfg)
+        result = handler.handle('cb-id', 55555, 'approval:fake-id:APPROVE')
+        self.assertEqual(result['outcome'], 'DENIED')
+        self.assertEqual(result['code'], 'unauthorized_sender')
+
+    def test_callback_handler_allows_authorized_chat_id_with_cfg(self):
+        """Handler with cfg must NOT deny authorized chat IDs at this check."""
+        from zamal_core.telegram_bot import TelegramCallbackHandler, TelegramConfig
+
+        cfg = TelegramConfig.__new__(TelegramConfig)
+        cfg._token = 'fixture:token'
+        cfg._allowed = {'99999'}
+
+        handler = TelegramCallbackHandler(self.s, cfg=cfg)
+        # approval_id doesn't exist → will fail at approval lookup, but NOT at auth check
+        result = handler.handle('cb-id', 99999, 'approval:nonexistent-id:APPROVE')
+        # Must NOT be unauthorized_sender — auth check passed, fails at approval lookup
+        self.assertNotEqual(result.get('code'), 'unauthorized_sender',
+                            'Authorized chat ID must pass the chat_id auth check')
+
+    def test_callback_handler_without_cfg_skips_auth_check(self):
+        """Backward compatibility: handler without cfg must not break on None cfg."""
+        from zamal_core.telegram_bot import TelegramCallbackHandler
+
+        handler = TelegramCallbackHandler(self.s, cfg=None)
+        # Should proceed past auth check (cfg is None), fail only at approval lookup
+        result = handler.handle('cb-id', 12345, 'approval:nonexistent-id:APPROVE')
+        self.assertNotEqual(result.get('code'), 'unauthorized_sender')

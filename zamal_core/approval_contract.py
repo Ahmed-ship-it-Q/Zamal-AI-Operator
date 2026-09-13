@@ -57,6 +57,9 @@ def records(store, task_id, payload):
     if payload.get('output_id'):
         row = store.db.execute('SELECT * FROM worker_outputs WHERE id=?', (payload['output_id'],)).fetchone()
         result['output'] = dict(row) if row else None
+    if payload.get('application_id') and store.db.execute("SELECT 1 FROM core_extensions WHERE name='job_app'").fetchone():
+        row = store.db.execute('SELECT * FROM job_applications WHERE id=?', (payload['application_id'],)).fetchone()
+        result['job_application'] = dict(row) if row else None
     return result
 
 
