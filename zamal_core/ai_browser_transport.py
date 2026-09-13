@@ -93,36 +93,51 @@ PROVIDER_CONFIGS: dict = {
     },
     'gemini': {
         'name': 'Gemini',
-        'url': 'https://gemini.google.com/',
+        'url': 'https://gemini.google.com/app',
         'domain': 'gemini.google.com',
         'free_api_note': 'Free API tier available via Google AI Studio. Browser session used as default.',
         'login_js': (
+            # SignOutOptions link is present when logged in; absent when not
             '(function(){'
-            'var inp=document.querySelector(".ql-editor,rich-textarea p,[contenteditable]");'
-            'var noLogin=!document.querySelector("a[href*=accounts]");'
-            'return JSON.stringify({logged_in:noLogin&&inp!==null,has_input:inp!==null});'
+            'var inp=document.querySelector("rich-textarea div[contenteditable],rich-textarea p");'
+            'var loggedIn=document.querySelector("a[href*=SignOutOptions]")!==null;'
+            'return JSON.stringify({logged_in:loggedIn&&inp!==null,has_input:inp!==null});'
             '})()'
         ),
         'inject_js': (
+            # execCommand works on Gemini's Quill contenteditable in Chrome
             '(function(p){'
-            'var el=document.querySelector(".ql-editor,rich-textarea p");'
+            'var el=document.querySelector(".ql-editor");'
             'if(!el)return false;'
             'el.focus();'
-            'document.execCommand("selectAll");'
+            'document.execCommand("selectAll",false,null);'
             'document.execCommand("insertText",false,p);'
             'return true;})'
         ),
         'submit_js': (
+            # gem-icon-button with send-button class; click its shadow-DOM inner button
             '(function(){'
-            'var b=document.querySelector("button.send-button,button[aria-label*=Send]");'
+            'var sb=null;'
+            'var all=document.querySelectorAll("gem-icon-button");'
+            'for(var i=0;i<all.length;i++){if(all[i].className.includes("send-button")){sb=all[i];break;}}'
+            'if(sb){var inner=sb.shadowRoot&&sb.shadowRoot.querySelector("button");'
+            '(inner||sb).click();return true;}'
+            'var b=document.querySelector("button[aria-label=\'Send message\']");'
             'if(b&&!b.disabled){b.click();return true;}return false;})()'
         ),
         'response_js': (
+            # model-response contains AI reply; extract p text to skip "Gemini said" header
             '(function(){'
-            'var m=document.querySelectorAll("model-response .markdown,.response-container-scrollable .markdown");'
-            'return m.length?m[m.length-1].innerText.trim():null;})()'
+            'var mrs=document.querySelectorAll("model-response");'
+            'if(!mrs.length)return null;'
+            'var last=mrs[mrs.length-1];'
+            'var paras=Array.from(last.querySelectorAll("p")).filter(function(p){return p.innerText.trim();});'
+            'return paras.length?paras.map(function(p){return p.innerText.trim();}).join("\\n"):last.innerText.trim();})()'
         ),
-        'loading_js': 'document.querySelector(".loading-indicator,.thinking-container")!==null',
+        'loading_js': (
+            'document.querySelector("model-response")!==null&&'
+            'document.querySelector("[class*=pending],[class*=streaming],loading-indicator")!==null'
+        ),
     },
     'deepseek': {
         'name': 'DeepSeek',
@@ -134,7 +149,7 @@ PROVIDER_CONFIGS: dict = {
         ),
         'login_js': (
             '(function(){'
-            'var inp=document.querySelector("textarea,[contenteditable]");'
+            'var inp=document.querySelector("textarea");'
             'var noLogin=!document.querySelector("input[type=password]");'
             'return JSON.stringify({logged_in:noLogin&&inp!==null,has_input:inp!==null});'
             '})()'
@@ -150,27 +165,31 @@ PROVIDER_CONFIGS: dict = {
         ),
         'submit_js': (
             '(function(){'
-            'var b=document.querySelector("button[type=submit],.send-btn");'
-            'if(b&&!b.disabled){b.click();return true;}return false;})()'
+            # DeepSeek uses div[role=button] with class ds-button--primary for send
+            'var b=document.querySelector("div.ds-button--primary.ds-button--filled,[data-testid=send-button]");'
+            'if(!b)b=document.querySelector("div.ds-button--primary");'
+            'if(b){b.click();return true;}return false;})()'
         ),
         'response_js': (
             '(function(){'
-            'var m=document.querySelectorAll(".ds-markdown,.message-content");'
+            'var m=document.querySelectorAll(".ds-markdown,.markdown-body,[class*=assistant] .markdown");'
             'return m.length?m[m.length-1].innerText.trim():null;})()'
         ),
-        'loading_js': 'document.querySelector(".loading,.typing-indicator")!==null',
+        'loading_js': (
+            'document.querySelector("._streaming,[class*=loading],[class*=generating]")!==null'
+        ),
     },
     'qwen': {
         'name': 'Qwen',
-        'url': 'https://chat.qwenlm.ai/',
-        'domain': 'chat.qwenlm.ai',
+        'url': 'https://chat.qwen.ai/',
+        'domain': 'chat.qwen.ai',
         'free_api_note': (
             'Qwen API available via Alibaba Cloud DashScope with free quota. '
             'Set QWEN_API_KEY in auth.env to use API instead of browser.'
         ),
         'login_js': (
             '(function(){'
-            'var inp=document.querySelector("textarea,[contenteditable]");'
+            'var inp=document.querySelector("textarea");'
             'var noLogin=!document.querySelector("input[type=password]");'
             'return JSON.stringify({logged_in:noLogin&&inp!==null,has_input:inp!==null});'
             '})()'
@@ -186,51 +205,67 @@ PROVIDER_CONFIGS: dict = {
         ),
         'submit_js': (
             '(function(){'
-            'var b=document.querySelector("button[type=submit],[aria-label*=Send]");'
+            'var b=document.querySelector("button[aria-label=Send],button.send-button");'
             'if(b&&!b.disabled){b.click();return true;}return false;})()'
         ),
         'response_js': (
             '(function(){'
-            'var m=document.querySelectorAll(".message-content,.assistant-message");'
+            'var m=document.querySelectorAll(".qwen-markdown,.custom-qwen-markdown");'
             'return m.length?m[m.length-1].innerText.trim():null;})()'
         ),
-        'loading_js': 'document.querySelector(".loading,.typing")!==null',
+        'loading_js': (
+            'document.querySelector("button[aria-label=Send]:disabled,[class*=generating],[class*=streaming]")!==null'
+        ),
     },
     'kimi': {
         'name': 'Kimi',
-        'url': 'https://kimi.moonshot.cn/',
-        'domain': 'kimi.moonshot.cn',
+        'url': 'https://www.kimi.ai/',
+        'domain': 'kimi.ai',
         'free_api_note': (
             'Moonshot AI has an API. '
             'Set KIMI_API_KEY in auth.env to use API instead of browser.'
         ),
         'login_js': (
             '(function(){'
-            'var inp=document.querySelector("textarea,[contenteditable]");'
+            'var inp=document.querySelector(".chat-input-editor,[contenteditable]");'
             'var noLogin=!document.querySelector("input[type=password]");'
             'return JSON.stringify({logged_in:noLogin&&inp!==null,has_input:inp!==null});'
             '})()'
         ),
         'inject_js': (
             '(function(p){'
-            'var el=document.querySelector("textarea");'
+            'var el=document.querySelector(".chat-input-editor");'
             'if(!el)return false;'
-            'var s=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,"value").set;'
-            's.call(el,p);'
-            'el.dispatchEvent(new Event("input",{bubbles:true}));'
+            'el.focus();'
+            'el.innerHTML="<p>"+p+"</p>";'
+            'el.dispatchEvent(new InputEvent("input",{bubbles:true,data:p}));'
             'return true;})'
         ),
         'submit_js': (
+            # Kimi send button is a div.send-button-container with an SVG icon
             '(function(){'
-            'var b=document.querySelector("button[type=submit],.send-btn");'
-            'if(b&&!b.disabled){b.click();return true;}return false;})()'
+            'var btn=document.querySelector(".send-button-container");'
+            'if(btn){btn.click();return true;}'
+            'var el=document.querySelector(".chat-input-editor");'
+            'if(!el)return false;'
+            'el.focus();'
+            'el.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",keyCode:13,bubbles:true,cancelable:true}));'
+            'return true;})()'
         ),
         'response_js': (
+            # chat-content-item-assistant contains full response including thinking
             '(function(){'
-            'var m=document.querySelectorAll(".message-content,.kimi-message");'
-            'return m.length?m[m.length-1].innerText.trim():null;})()'
+            'var items=document.querySelectorAll(".chat-content-item-assistant");'
+            'if(!items.length)return null;'
+            'var last=items[items.length-1];'
+            'var txt=last.innerText.trim();'
+            'var thinkEnd=txt.indexOf("\\n\\n");'
+            'return thinkEnd>0&&txt.startsWith("Think\\n")?txt.slice(thinkEnd+2).trim():txt;})()'
         ),
-        'loading_js': 'document.querySelector(".loading")!==null',
+        'loading_js': (
+            'document.querySelector(".chat-content-item-assistant [class*=loading],'
+            '[class*=generating],[class*=streaming],.segment-assistant [class*=pending]")!==null'
+        ),
     },
 }
 
@@ -291,19 +326,29 @@ def _open_tab(url: str) -> bool:
 
 
 def _exec_js_in_domain(domain: str, js: str, timeout: int = 12) -> tuple:
-    """Execute JS in first Chrome tab whose URL contains domain."""
+    """Execute JS in the active Chrome tab matching domain; fall back to last match."""
     js_safe = js.replace('\\', '\\\\').replace('"', '\\"')
+    # Prefer active tab first, then last matching tab
     script = (
         f'tell application "Google Chrome"\n'
+        f'  -- Check active tab first\n'
+        f'  repeat with w in windows\n'
+        f'    set activeTb to active tab of w\n'
+        f'    if (URL of activeTb) contains "{domain}" then\n'
+        f'      set r to execute activeTb javascript "{js_safe}"\n'
+        f'      return r as string\n'
+        f'    end if\n'
+        f'  end repeat\n'
+        f'  -- Fall back to last matching tab\n'
+        f'  set lastResult to "NO_TAB"\n'
         f'  repeat with w in windows\n'
         f'    repeat with t in tabs of w\n'
         f'      if (URL of t) contains "{domain}" then\n'
-        f'        set r to execute t javascript "{js_safe}"\n'
-        f'        return r as string\n'
+        f'        set lastResult to execute t javascript "{js_safe}"\n'
         f'      end if\n'
         f'    end repeat\n'
         f'  end repeat\n'
-        f'  return "NO_TAB"\n'
+        f'  return lastResult as string\n'
         f'end tell'
     )
     ok, out = _run_osascript(script, timeout=timeout)
@@ -315,6 +360,12 @@ def _wait_tab_loaded(domain: str, timeout: int = 20) -> bool:
     while time.monotonic() < deadline:
         script = (
             f'tell application "Google Chrome"\n'
+            f'  repeat with w in windows\n'
+            f'    set activeTb to active tab of w\n'
+            f'    if (URL of activeTb) contains "{domain}" then\n'
+            f'      return loading of activeTb as string\n'
+            f'    end if\n'
+            f'  end repeat\n'
             f'  repeat with w in windows\n'
             f'    repeat with t in tabs of w\n'
             f'      if (URL of t) contains "{domain}" then\n'
