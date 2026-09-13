@@ -501,8 +501,8 @@ class BrowserAITransport:
             h = self._health.get(provider)
             if h:
                 h.consecutive_failures += 1
+                h.status = 'UNAVAILABLE'
                 if h.consecutive_failures >= self.CIRCUIT_FAILURES:
-                    h.status = 'UNAVAILABLE'
                     h.unavailable_until = time.monotonic() + self.CIRCUIT_TIMEOUT
 
     def _mark_success(self, provider: str, response: str):
