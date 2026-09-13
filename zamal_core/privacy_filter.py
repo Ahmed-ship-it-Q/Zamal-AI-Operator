@@ -17,12 +17,15 @@ from .integration_security import SECRET_TEXT
 _IBAN_RE = re.compile(
     r'\b[A-Z]{2}\d{2}[A-Z0-9]{4,30}\b'
 )
-# Credit/debit card numbers (Luhn-format length/prefix check)
+# Credit/debit card numbers (Luhn-format length/prefix check); optional dash/space separators
+_SEP = r'[\s-]?'
 _CARD_RE = re.compile(
-    r'\b(?:4[0-9]{12}(?:[0-9]{3})?'     # Visa
-    r'|5[1-5][0-9]{14}'                   # Mastercard
-    r'|3[47][0-9]{13}'                    # Amex
-    r'|6(?:011|5[0-9]{2})[0-9]{12})\b'   # Discover
+    r'\b(?:'
+    r'4[0-9]{3}' + _SEP + r'[0-9]{4}' + _SEP + r'[0-9]{4}' + _SEP + r'[0-9]{1,4}'  # Visa
+    r'|5[1-5][0-9]{2}' + _SEP + r'[0-9]{4}' + _SEP + r'[0-9]{4}' + _SEP + r'[0-9]{4}'  # MC
+    r'|3[47][0-9]{2}' + _SEP + r'[0-9]{6}' + _SEP + r'[0-9]{5}'  # Amex
+    r'|6(?:011|5[0-9]{2})' + _SEP + r'[0-9]{4}' + _SEP + r'[0-9]{4}' + _SEP + r'[0-9]{4}'  # Disc
+    r')\b'
 )
 # US SSN
 _SSN_RE = re.compile(r'\b\d{3}-\d{2}-\d{4}\b')

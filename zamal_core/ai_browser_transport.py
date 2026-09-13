@@ -37,16 +37,18 @@ PROVIDER_CONFIGS: dict = {
         ),
         'inject_js': (
             '(function(p){'
-            'var el=document.querySelector("#prompt-textarea,textarea[placeholder]");'
+            'var el=document.querySelector("#prompt-textarea");'
             'if(!el)return false;'
-            'var s=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,"value").set;'
-            's.call(el,p);'
+            'el.focus();'
+            'document.execCommand("selectAll",false,null);'
+            'document.execCommand("insertText",false,p);'
             'el.dispatchEvent(new Event("input",{bubbles:true}));'
             'return true;})'
         ),
         'submit_js': (
             '(function(){'
-            'var b=document.querySelector("button[data-testid=send-button],button[aria-label*=Send]");'
+            'var b=document.querySelector("button[data-testid=send-button]");'
+            'if(!b)b=document.querySelector("button[aria-label=\'Send prompt\']");'
             'if(b&&!b.disabled){b.click();return true;}return false;})()'
         ),
         'response_js': (
@@ -79,12 +81,12 @@ PROVIDER_CONFIGS: dict = {
         ),
         'submit_js': (
             '(function(){'
-            'var b=document.querySelector("button[aria-label*=Send],button[type=submit]");'
+            'var b=document.querySelector("[data-testid=chat-input-send]");'
             'if(b&&!b.disabled){b.click();return true;}return false;})()'
         ),
         'response_js': (
             '(function(){'
-            'var m=document.querySelectorAll(".font-claude-message,[data-is-streaming=false] .prose");'
+            'var m=document.querySelectorAll("[data-is-streaming=false] .prose");'
             'return m.length?m[m.length-1].innerText.trim():null;})()'
         ),
         'loading_js': 'document.querySelector("[data-is-streaming=true]")!==null',
@@ -467,7 +469,8 @@ class BrowserAITransport:
             is_loading = ok_l and 'true' in loading.lower()
 
             ok_r, resp = _exec_js_in_domain(domain, config['response_js'], timeout=5)
-            if ok_r and resp and resp.lower() not in ('null', 'false', ''):
+            _skip = ('null', 'false', '', 'missing value', 'undefined', 'none')
+            if ok_r and resp and resp.lower().strip() not in _skip:
                 last_response = resp
 
             if not is_loading and last_response:
