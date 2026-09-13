@@ -12,6 +12,9 @@ Endpoints:
   POST /api/emergency-stop-clear Clear emergency flag
   GET  /api/cpc-status          CPC project status (read-only)
   POST /api/run-task            Run task in background thread
+  GET  /api/ai-providers        Browser AI provider statuses
+  POST /api/ai-task             Submit task through smart AI router
+  POST /api/ai-health-check     Force health check for one provider
 """
 import json
 import os
@@ -128,9 +131,32 @@ def _check_browser():
     return 'unconfigured'
 
 
-def _check_telegram():
-    """TelegramConfig().configured."""
+def _load_auth_env():
+    """Load ZAMAL_* credentials from state/gateway/auth.env into os.environ if not already set."""
+    auth_path = _OPERATOR_ROOT / 'state' / 'gateway' / 'auth.env'
+    if not auth_path.exists():
+        return
     try:
+        import stat
+        mode = auth_path.stat().st_mode
+        if mode & (stat.S_IRGRP | stat.S_IROTH):
+            return  # refuse to read world-readable credential file
+        with open(auth_path) as f:
+            for line in f:
+                line = line.strip()
+                if '=' in line and not line.startswith('#'):
+                    k, v = line.split('=', 1)
+                    k = k.strip()
+                    if k and k not in os.environ:
+                        os.environ[k] = v.strip()
+    except Exception:
+        pass
+
+
+def _check_telegram():
+    """TelegramConfig().configured — also reads auth.env for env vars."""
+    try:
+        _load_auth_env()
         from .telegram_bot import TelegramConfig
         tc = TelegramConfig()
         return 'configured' if tc.configured else 'unconfigured'
@@ -168,6 +194,14 @@ def _check_cpc():
     if path_ok:
         return 'partial'
     return 'unconfigured'
+
+
+def _check_ai_browser() -> str:
+    """Check if browser AI transport is available (darwin + Chrome)."""
+    import sys
+    if sys.platform != 'darwin':
+        return 'unconfigured'
+    return _check_browser()
 
 
 def get_connection_status():
@@ -425,8 +459,9 @@ def _advance_task_to_completed(store, task_id):
 
 
 def _maybe_send_telegram(task_id, analysis):
-    """Send Telegram summary if configured."""
+    """Send Telegram summary if configured (also loads auth.env)."""
     try:
+        _load_auth_env()
         from .telegram_bot import TelegramConfig
         tc = TelegramConfig()
         if not tc.configured:
@@ -479,7 +514,22 @@ _HTML_UI = '''<!DOCTYPE html>
   #left-panel { width: 280px; border-right: 1px solid #2d3748; background: #141622;
                 flex-shrink: 0; }
   #center-panel { flex: 1; border-right: 1px solid #2d3748; }
-  #right-panel { width: 360px; background: #141622; flex-shrink: 0; }
+  #right-panel { width: 380px; background: #141622; flex-shrink: 0; }
+  .ai-provider-row { display:flex; align-items:center; justify-content:space-between;
+                     padding:4px 0; font-size:12px; border-bottom:1px solid #2d3748; }
+  .ai-provider-name { color:#e2e8f0; font-weight:600; }
+  .ai-status { font-size:10px; font-weight:700; padding:2px 6px; border-radius:10px; }
+  .ai-LIVE_VERIFIED    { background:#22543d; color:#9ae6b4; }
+  .ai-SESSION_REQUIRED { background:#7b341e; color:#fbd38d; }
+  .ai-RATE_LIMITED     { background:#744210; color:#faf089; }
+  .ai-UNAVAILABLE      { background:#742a2a; color:#fc8181; }
+  .ai-NOT_CONFIGURED   { background:#2d3748; color:#718096; }
+  .ai-task-result { font-size:12px; background:#1a1d2e; padding:8px; border-radius:4px;
+                    max-height:180px; overflow-y:auto; white-space:pre-wrap; margin-top:6px;
+                    word-break:break-word; color:#cbd5e0; }
+  select.task-type-select { background:#1a1d2e; border:1px solid #2d3748; color:#e2e8f0;
+                            padding:6px 8px; border-radius:6px; font-size:13px; width:100%;
+                            margin-top:6px; }
   .section-title { font-size: 11px; font-weight: 700; text-transform: uppercase;
                    letter-spacing: 1px; color: #718096; margin-bottom: 10px; }
   textarea { width: 100%; background: #1a1d2e; border: 1px solid #2d3748; color: #e2e8f0;
@@ -551,6 +601,20 @@ _HTML_UI = '''<!DOCTYPE html>
     <textarea id="task-input" placeholder="Describe the task..."></textarea>
     <button class="submit-btn" onclick="submitTask()">Submit Task</button>
     <hr class="section-sep">
+    <div class="section-title">AI Router Task</div>
+    <textarea id="ai-task-input" placeholder="Public research or reasoning prompt..."></textarea>
+    <select class="task-type-select" id="ai-task-type">
+      <option value="default">Auto (default)</option>
+      <option value="analysis">Analysis</option>
+      <option value="research">Research</option>
+      <option value="reasoning">Reasoning</option>
+      <option value="coding">Coding</option>
+      <option value="summarize">Summarize</option>
+      <option value="creative">Creative</option>
+    </select>
+    <button class="submit-btn" onclick="submitAITask()" style="background:#553c9a">Route via AI</button>
+    <div id="ai-task-status" style="font-size:11px;color:#718096;margin-top:4px"></div>
+    <hr class="section-sep">
     <div class="section-title">Connections</div>
     <table class="status-table" id="status-table">
       <tbody id="status-body"><tr><td colspan="2" style="color:#718096">Loading...</td></tr></tbody>
@@ -561,6 +625,9 @@ _HTML_UI = '''<!DOCTYPE html>
     <div id="task-list"></div>
   </div>
   <div id="right-panel" class="panel">
+    <div class="section-title">AI Providers</div>
+    <div id="ai-providers-list"><p style="color:#718096;font-size:12px">Loading...</p></div>
+    <hr class="section-sep">
     <div class="section-title">Task Detail</div>
     <div id="task-detail"><p style="color:#718096;font-size:13px">Select a task to view details.</p></div>
     <hr class="section-sep">
@@ -742,11 +809,75 @@ function emergencyStop() {
   .catch(function(err) { showMsg(String(err), true); });
 }
 
+function refreshAIProviders() {
+  apiFetch('/api/ai-providers').then(function(d) {
+    var providers = d.providers || {};
+    var html = Object.keys(providers).map(function(k) {
+      var p = providers[k];
+      var st = p.status || 'NOT_CONFIGURED';
+      var preview = p.last_response_preview ? ' · "' + escHtml(p.last_response_preview.substring(0,40)) + '..."' : '';
+      return '<div class="ai-provider-row">' +
+        '<span class="ai-provider-name">' + escHtml(p.name || k) + '</span>' +
+        '<span class="ai-status ai-' + st + '">' + st.replace(/_/g,' ') + '</span>' +
+        '</div>' +
+        (preview ? '<div style="font-size:10px;color:#718096;padding:0 0 4px 2px">' + preview + '</div>' : '');
+    }).join('');
+    document.getElementById('ai-providers-list').innerHTML = html ||
+      '<p style="color:#718096;font-size:12px">No providers configured.</p>';
+  }).catch(function() {});
+}
+
+var _aiTaskId = null;
+var _aiPollInterval = null;
+
+function submitAITask() {
+  var prompt = document.getElementById('ai-task-input').value.trim();
+  if (!prompt) { showMsg('Please enter a prompt', true); return; }
+  var taskType = document.getElementById('ai-task-type').value;
+  document.getElementById('ai-task-status').textContent = 'Routing…';
+  apiFetch('/api/ai-task', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({prompt: prompt, task_type: taskType})
+  }).then(function(d) {
+    _aiTaskId = d.task_id;
+    document.getElementById('ai-task-input').value = '';
+    document.getElementById('ai-task-status').textContent = 'Task ' + _aiTaskId.substring(0,8) + ' — routing via AI…';
+    showMsg('AI task started');
+    refreshTasks();
+    selectTask(_aiTaskId);
+    // Poll until completed
+    if (_aiPollInterval) clearInterval(_aiPollInterval);
+    _aiPollInterval = setInterval(function() {
+      if (!_aiTaskId) { clearInterval(_aiPollInterval); return; }
+      apiFetch('/api/task/' + _aiTaskId).then(function(t) {
+        if (t.state === 'COMPLETED' || t.state === 'FAILED' || t.state === 'REJECTED') {
+          clearInterval(_aiPollInterval);
+          var fr = t.final_result || t.context && t.context.final_result;
+          if (fr && fr.provider) {
+            document.getElementById('ai-task-status').textContent =
+              'Done via ' + fr.provider + ' · Privacy: ' + (fr.privacy_level||'?') +
+              ' · Fallbacks: ' + (fr.fallback_history||[]).length;
+          } else {
+            document.getElementById('ai-task-status').textContent = 'Completed (state: ' + t.state + ')';
+          }
+          refreshTasks();
+          refreshAIProviders();
+        }
+      }).catch(function(){});
+    }, 3000);
+  }).catch(function(err) {
+    document.getElementById('ai-task-status').textContent = 'Error: ' + err;
+    showMsg(String(err), true);
+  });
+}
+
 function refresh() {
   updateClock();
   refreshStatus();
   refreshTasks();
   refreshActivity();
+  refreshAIProviders();
 }
 
 setInterval(refresh, 5000);
@@ -819,6 +950,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_activity(params)
             elif path == '/api/cpc-status':
                 self._handle_cpc_status()
+            elif path == '/api/ai-providers':
+                self._handle_ai_providers()
             else:
                 self._error(404, 'Not found')
         except Exception as exc:
@@ -838,6 +971,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_emergency_stop_clear(body)
             elif path == '/api/run-task':
                 self._handle_run_task(body)
+            elif path == '/api/ai-task':
+                self._handle_ai_task(body)
+            elif path == '/api/ai-health-check':
+                self._handle_ai_health_check(body)
             else:
                 self._error(404, 'Not found')
         except json.JSONDecodeError:
@@ -901,7 +1038,17 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._error(404, str(e))
             return
-        self._send_json(_sanitize_obj(task))
+        ctx = task.get('context', {}) or {}
+        sanitized = _sanitize_obj(task)
+        # Expose context fields at top level for UI convenience
+        sanitized['task_id'] = task.get('id')
+        sanitized['kind'] = task.get('task_type')
+        sanitized['summary'] = task.get('command', '')[:200]
+        sanitized['evidence'] = ctx.get('evidence', [])
+        sanitized['final_result'] = ctx.get('final_result')
+        sanitized['plan'] = ctx.get('plan', [])
+        sanitized['errors'] = ctx.get('errors', [])
+        self._send_json(sanitized)
 
     def _handle_activity(self, params):
         since = float(params.get('since', 0))
@@ -1063,6 +1210,99 @@ class _Handler(BaseHTTPRequestHandler):
         t = threading.Thread(target=_run, daemon=True)
         t.start()
         self._send_json({'result': 'ok', 'task_id': task_id, 'status': 'running'})
+
+    def _handle_ai_providers(self):
+        try:
+            from .ai_router import get_router
+            router = get_router()
+            statuses = router.provider_statuses()
+            self._send_json({'providers': _sanitize_obj(statuses)})
+        except Exception as exc:
+            self._error(500, str(exc))
+
+    def _handle_ai_task(self, body):
+        prompt = str(body.get('prompt', '')).strip()
+        if not prompt:
+            self._error(400, 'prompt required')
+            return
+        task_type = str(body.get('task_type', 'default')).strip() or 'default'
+        force_exclude = tuple(body.get('force_exclude', []))
+        task_id = str(body.get('task_id', '')).strip() or None
+
+        # Create a store task for provenance
+        try:
+            store = _get_store()
+            task = store.create_task(
+                command=f'AI router task ({task_type}): {prompt[:80]}',
+                task_type='ai_router',
+                project='zamal_operator',
+                request_key=str(uuid.uuid4()),
+                context={'inputs': [prompt[:200]], 'task_type': task_type},
+            )
+            ai_task_id = task['id']
+            store.close()
+        except Exception:
+            ai_task_id = task_id or str(uuid.uuid4())
+
+        def _run_and_store():
+            try:
+                from .ai_router import get_router
+                router = get_router()
+                result = router.route(
+                    prompt, task_type=task_type,
+                    task_id=ai_task_id, force_exclude=force_exclude,
+                )
+                # Store result in task context
+                try:
+                    from .store import Store
+                    s2 = Store()
+                    t2 = s2.task(ai_task_id)
+                    s2.patch_context(ai_task_id, {
+                        'final_result': _sanitize_obj({
+                            'ok': result.ok,
+                            'provider': result.provider,
+                            'response': result.response[:2000] if result.response else '',
+                            'privacy_level': result.privacy_level,
+                            'fallback_history': result.fallback_history,
+                            'provenance': result.provenance,
+                            'error': result.error,
+                            'status': result.status,
+                        }),
+                        'evidence': [
+                            f"Provider: {result.provider or 'none'}",
+                            f"Privacy: {result.privacy_level}",
+                            f"Fallbacks tried: {len(result.fallback_history)}",
+                            f"Status: {result.status}",
+                        ],
+                    }, t2['revision'])
+                    _advance_task_to_completed(s2, ai_task_id)
+                    s2.close()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_run_and_store, daemon=True)
+        t.start()
+        self._send_json({
+            'result': 'ok',
+            'task_id': ai_task_id,
+            'status': 'running',
+            'message': 'AI router task started; poll /api/task/' + ai_task_id + ' for result',
+        }, 202)
+
+    def _handle_ai_health_check(self, body):
+        provider = str(body.get('provider', '')).strip()
+        if not provider:
+            self._error(400, 'provider required')
+            return
+        try:
+            from .ai_router import get_router
+            router = get_router()
+            result = router.force_health_check(provider)
+            self._send_json(_sanitize_obj(result))
+        except Exception as exc:
+            self._error(500, str(exc))
 
 
 # Import Gate for use in handler
