@@ -13,6 +13,7 @@ All subprocess, socket and process calls mocked; no real services started.
 No CPC writes, commit, push, or external actions performed.
 """
 import socket
+import sys
 import tempfile
 import time
 import unittest
@@ -186,6 +187,7 @@ class PrivatePathDenialTests(MacSafetyFixture):
 
 # ─── 3. Approval-required action ─────────────────────────────────────────────
 
+@unittest.skipUnless(sys.platform == 'darwin', 'macOS only')
 class ApprovalRequiredTests(MacSafetyFixture):
     """service_start is PROTECTED: stops at PENDING; cannot execute without approval."""
 

@@ -885,6 +885,7 @@ class SchemaV4Tests(unittest.TestCase):
 
 # ── CpcReadonlyPreservedTests ─────────────────────────────────────────────────
 
+@unittest.skipUnless(sys.platform == 'darwin', 'macOS only')
 class CpcReadonlyPreservedTests(unittest.TestCase):
 
     def setUp(self):
@@ -1028,6 +1029,7 @@ class Phase7PolicyTests(unittest.TestCase):
 
 # ── Phase7CliTests ─────────────────────────────────────────────────────────────
 
+@unittest.skipUnless(sys.platform == 'darwin', 'macOS only')
 class Phase7CliTests(unittest.TestCase):
     """Smoke tests for Phase 7 CLI commands via direct module calls (not subprocess)."""
 

@@ -192,6 +192,7 @@ class WorkerTests(unittest.TestCase):
         (self.operator / 'bad.py').write_text('def broken(:')
         self.assertFalse(self.execute('verify', {'workspace': 'operator', 'command': 'python_syntax', 'path': 'bad.py'})['passed'])
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS only')
     def test_real_fixed_version_and_node_syntax_commands(self):
         for command in ('git_version', 'node_version'):
             r = self.execute('verify', {'workspace': 'operator', 'command': command})

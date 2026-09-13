@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch,MagicMock
@@ -13,6 +14,7 @@ from zamal_core.telegram_bot import TelegramBot,_approval_keyboard
 from zamal_core.job_browser_fixture import identity
 
 
+@unittest.skipUnless(sys.platform == 'darwin', 'macOS only')
 class JobBrowserTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.op=Path(self.tmp.name)

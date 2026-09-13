@@ -166,6 +166,7 @@ class FolderPolicyTests(unittest.TestCase):
 # 2. MacCommandPolicy (terminal bridge)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@unittest.skipUnless(sys.platform == 'darwin', 'macOS only')
 class MacCommandPolicyTests(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -238,6 +239,7 @@ class MacCommandPolicyTests(unittest.TestCase):
 # 3. ProcessControl
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@unittest.skipUnless(sys.platform == 'darwin', 'macOS only')
 class ProcessControlTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='zamal-p6-pc-')
@@ -412,6 +414,7 @@ class BrowserWorkerTests(unittest.TestCase):
 # 5. TccPermissionGate
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@unittest.skipUnless(sys.platform == 'darwin', 'macOS only')
 class TccPermissionGateTests(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -478,6 +481,7 @@ class TccPermissionGateTests(unittest.TestCase):
 # 6. MacWorker + Gate (full capability dispatch)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@unittest.skipUnless(sys.platform == 'darwin', 'macOS only')
 class MacWorkerGateTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='zamal-p6-mw-')
