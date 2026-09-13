@@ -45,8 +45,9 @@ def redact(text):
 class Paths:
     def __init__(self, operator, cpc):
         # Roots supplied ONLY by trusted application startup, never action payloads.
-        self.roots = MappingProxyType({'operator': Path(operator).resolve(strict=True),
-                                      'cpc': Path(cpc).resolve(strict=True)})
+        # strict=False: CPC path may not exist in CI/test environments.
+        self.roots = MappingProxyType({'operator': Path(operator).resolve(),
+                                      'cpc': Path(cpc).resolve()})
         if self.roots['operator'] == self.roots['cpc']:
             raise Denied('Workspace roots must differ')
 
@@ -217,8 +218,9 @@ class Capability:
 class LocalWorker:
     def __init__(self, store, *, operator=None, cpc=None, node=None):
         self.store = store
+        from .paths import CPC_ROOT
         self.paths = Paths(operator or Path(__file__).resolve().parent.parent,
-                           cpc or '/Users/book/Desktop/AI-GROCERY-DECISION-PLATFORM')
+                           cpc or str(CPC_ROOT))
         self.controls = Controls(store)
         self.commands = CommandPolicy(node)
         self.runner = Runner()
