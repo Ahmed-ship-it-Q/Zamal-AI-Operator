@@ -298,7 +298,7 @@ def _exec_js_in_domain(domain: str, js: str, timeout: int = 12) -> tuple:
         f'      if (URL of t) contains "{domain}" then\n'
         f'        set r to execute t javascript "{js_safe}"\n'
         f'        return r as string\n'
-        f'      end repeat\n'
+        f'      end if\n'
         f'    end repeat\n'
         f'  end repeat\n'
         f'  return "NO_TAB"\n'
@@ -317,7 +317,7 @@ def _wait_tab_loaded(domain: str, timeout: int = 20) -> bool:
             f'    repeat with t in tabs of w\n'
             f'      if (URL of t) contains "{domain}" then\n'
             f'        return loading of t as string\n'
-            f'      end repeat\n'
+            f'      end if\n'
             f'    end repeat\n'
             f'  end repeat\n'
             f'  return "not_found"\n'
@@ -396,12 +396,17 @@ class BrowserAITransport:
         url = config['url']
 
         ok, result = _exec_js_in_domain(domain, config['login_js'], timeout=10)
+        # Fast-fail: Chrome JS via Apple Events is disabled — user must enable it once
+        if not ok and 'apple events' in result.lower():
+            return 'NOT_CONFIGURED'
         if not ok:
             if not _open_tab(url):
                 return 'UNAVAILABLE'
             time.sleep(3)
             _wait_tab_loaded(domain, timeout=20)
             ok, result = _exec_js_in_domain(domain, config['login_js'], timeout=10)
+            if not ok and 'apple events' in result.lower():
+                return 'NOT_CONFIGURED'
             if not ok:
                 return 'UNAVAILABLE'
 
@@ -431,6 +436,8 @@ class BrowserAITransport:
 
         # Verify login
         ok, login_result = _exec_js_in_domain(domain, config['login_js'], timeout=10)
+        if not ok and 'apple events' in login_result.lower():
+            return {'ok': False, 'error': 'js_apple_events_disabled', 'status': 'NOT_CONFIGURED'}
         if not ok or not _parse_login_result(login_result):
             self._mark(provider, 'SESSION_REQUIRED')
             return {'ok': False, 'error': 'session_required', 'status': 'SESSION_REQUIRED'}

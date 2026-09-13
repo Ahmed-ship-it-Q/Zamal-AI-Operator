@@ -1237,7 +1237,7 @@ class _Handler(BaseHTTPRequestHandler):
                 task_type='ai_router',
                 project='zamal_operator',
                 request_key=str(uuid.uuid4()),
-                context={'inputs': [prompt[:200]], 'task_type': task_type},
+                context={'inputs': [prompt[:200]], 'scope': task_type},
             )
             ai_task_id = task['id']
             store.close()

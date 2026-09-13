@@ -184,13 +184,13 @@ class AIRouter:
             store = Store()
             task = store.task(task_id)
             store.patch_context(task_id, {
-                'checkpoint': {
+                'next_action': json.dumps({
                     'awaiting_session': provider,
                     'prompt_length': len(prompt),
                     'task_type': task_type,
                     'privacy_level': privacy_level,
                     'checkpoint_at': time.time(),
-                }
+                }),
             }, task['revision'])
             store.close()
         except Exception:
