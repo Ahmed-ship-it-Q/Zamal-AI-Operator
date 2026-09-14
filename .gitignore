@@ -34,3 +34,4 @@ system
 
 # CPC path reference (environment-specific)
 config/cpc_project_path.txt
+config/n8n_api_key.txt

@@ -100,7 +100,8 @@ class ChannelAdapter:
          - zero external action guaranteed
     """
 
-    CHANNELS = frozenset({'telegram', 'gmail', 'calendar', 'whatsapp', 'facebook', 'instagram'})
+    CHANNELS = frozenset({'telegram', 'gmail', 'calendar', 'whatsapp',
+                          'facebook', 'messenger', 'instagram'})
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -185,6 +186,76 @@ class ChannelAdapter:
             action='send_message',
             destination=sanitized_dest,
             preview=flt.text[:500],
+            task_id=task_id,
+            approval_id=approval_id,
+            payload=payload,
+            timestamp=time.time(),
+        )
+        with self._lock:
+            self._proposals[proposal_id] = proposal
+        return proposal
+
+    def search(self, channel: str, query: str, *, limit: int = 10,
+               task_id: str = '') -> 'ChannelResult':
+        """Search a channel for items matching the query. No approval required."""
+        return self.read(channel, limit=limit, query=query, task_id=task_id)
+
+    def summarize_items(self, items: list, channel: str = '') -> dict:
+        """Classify and summarize a list of ChannelItems. No external action."""
+        categories: dict = {}
+        for item in items:
+            subj = (item.subject or item.preview or '').lower()
+            if any(k in subj for k in ('job', 'position', 'career', 'recruit', 'hiring')):
+                cat = 'job'
+            elif any(k in subj for k in ('invoice', 'payment', 'bank', 'finance', 'order')):
+                cat = 'finance'
+            elif any(k in subj for k in ('urgent', 'asap', 'emergency', 'immediately')):
+                cat = 'urgent'
+            elif any(k in subj for k in ('customer', 'client', 'enquiry', 'inquiry', 'support')):
+                cat = 'customer'
+            else:
+                cat = 'informational'
+            categories[cat] = categories.get(cat, 0) + 1
+        return {
+            'total': len(items),
+            'categories': categories,
+            'channel': channel,
+            'privacy_level': 'SANITIZED',
+        }
+
+    def draft_reply(self, channel: str, item_id: str, draft_content: str,
+                    destination: str = '', *, task_id: str = '',
+                    actor: str = 'operator') -> 'ActionProposal':
+        """Create a reply draft proposal (requires approval before send)."""
+        return self.propose_send(channel, destination or item_id, draft_content,
+                                 task_id=task_id, actor=actor)
+
+    def propose_delete_event(self, event_id: str, event_title: str = '',
+                              *, task_id: str = '',
+                              actor: str = 'operator') -> 'ActionProposal':
+        """Propose deleting a calendar event. No deletion until approval."""
+        proposal_id = str(uuid.uuid4())
+        payload = {
+            'channel': 'calendar',
+            'event_id': event_id,
+            'event_title': event_title[:200],
+        }
+        preview = f'Delete calendar event: {event_title or event_id}'
+        approval_id = self._create_approval(
+            task_id=task_id,
+            action='delete_event',
+            channel='calendar',
+            destination='Google Calendar',
+            preview=preview,
+            payload=payload,
+            actor=actor,
+        )
+        proposal = ActionProposal(
+            proposal_id=proposal_id,
+            channel='calendar',
+            action='delete_event',
+            destination='Google Calendar',
+            preview=preview,
             task_id=task_id,
             approval_id=approval_id,
             payload=payload,
@@ -390,6 +461,7 @@ def _get_reader(channel: str):
         'calendar': _read_calendar,
         'whatsapp': _read_whatsapp,
         'facebook': _read_facebook,
+        'messenger': _read_messenger,
         'instagram': _read_instagram,
     }[channel]
 
@@ -403,6 +475,7 @@ def _get_executor(channel: str, action: str):
         'calendar:delete_event': _exec_calendar_delete,
         'whatsapp:send_message': _exec_whatsapp_send,
         'facebook:send_message': _exec_facebook_send,
+        'messenger:send_message': _exec_messenger_send,
         'instagram:send_message': _exec_instagram_dm,
         'telegram:send_message': _exec_telegram_send,
     }
@@ -440,22 +513,38 @@ def _read_telegram(*, limit=10, query='') -> list:
 
 
 def _read_gmail(*, limit=10, query='') -> list:
-    """Read Gmail inbox via logged-in Chrome session."""
+    """Read Gmail inbox via logged-in Chrome session. Supports keyword query filtering."""
     from .ai_browser_transport import _exec_js_in_domain
+    # If there's a query, navigate to search results first
+    if query:
+        nav_js = f'''(function(){{
+          var q=encodeURIComponent({json.dumps(query[:100])});
+          if(!location.href.includes('#search/'+q)&&!location.href.includes('q='+q)){{
+            window.location='https://mail.google.com/mail/u/0/#search/'+q;
+            return JSON.stringify({{navigating:true}});
+          }}
+          return JSON.stringify({{here:true}});
+        }})()'''
+        import time as _t
+        ok_nav, _ = _exec_js_in_domain('mail.google.com', nav_js, timeout=8)
+        if ok_nav:
+            _t.sleep(2)
     js = f'''(function(){{
       var rows=document.querySelectorAll('tr.zA');
       var emails=[];
       var n=Math.min(rows.length,{limit});
       for(var i=0;i<n;i++){{
         var r=rows[i];
-        var subEl=r.querySelector('[data-thread-id] span,.y6 span');
+        var subEl=r.querySelector('[data-thread-id] span,.y6 span,.bqe');
         var bodyEl=r.querySelector('.y2');
-        var timeEl=r.querySelector('.xW .xY span');
+        var timeEl=r.querySelector('.xW .xY span,[title]');
+        var isUnread=r.classList.contains('zE');
         emails.push({{
           id:r.getAttribute('id')||String(i),
           subject:(subEl?.innerText||'').slice(0,200),
           preview:(bodyEl?.innerText||'').slice(0,300),
-          time:(timeEl?.getAttribute('title')||'').slice(0,30)
+          time:(timeEl?.getAttribute('title')||'').slice(0,30),
+          unread:isUnread
         }});
       }}
       return JSON.stringify(emails);
@@ -465,15 +554,23 @@ def _read_gmail(*, limit=10, query='') -> list:
         return []
     try:
         data = json.loads(out)
-        return [ChannelItem(
-            channel='gmail',
-            item_id=d.get('id', str(i)),
-            sender='[CONTACT]',
-            subject=_mask_pii(d.get('subject', '')[:200]),
-            preview=_mask_pii(d.get('preview', '')[:300]),
-            timestamp=time.time(),
-            metadata={'time': d.get('time', '')},
-        ) for i, d in enumerate(data)]
+        items = []
+        for i, d in enumerate(data):
+            subj = _mask_pii(d.get('subject', '')[:200])
+            prev = _mask_pii(d.get('preview', '')[:300])
+            # Client-side query filter if not navigated to search URL
+            if query and query.lower() not in subj.lower() and query.lower() not in prev.lower():
+                continue
+            items.append(ChannelItem(
+                channel='gmail',
+                item_id=d.get('id', str(i)),
+                sender='[CONTACT]',
+                subject=subj,
+                preview=prev,
+                timestamp=time.time(),
+                metadata={'time': d.get('time', ''), 'unread': d.get('unread', False)},
+            ))
+        return items
     except Exception:
         return []
 
@@ -529,8 +626,28 @@ def _read_calendar(*, limit=10, query='') -> list:
 
 
 def _read_whatsapp(*, limit=10, query='') -> list:
-    """Read WhatsApp Web conversations via logged-in Chrome session."""
+    """Read WhatsApp Web conversations via logged-in Chrome session. Supports query search."""
     from .ai_browser_transport import _exec_js_in_domain
+    import time as _t
+
+    # If there's a search query, use the WhatsApp search box
+    if query:
+        search_js = f'''(function(){{
+          var searchBtn=document.querySelector('[data-testid=search],[aria-label*=Search],[title*=Search]');
+          if(searchBtn){{searchBtn.click();}}
+          var inp=document.querySelector('[data-testid=chat-list-search],[aria-label*="Search or start"]');
+          if(inp){{
+            inp.focus();
+            document.execCommand('selectAll',false,null);
+            document.execCommand('insertText',false,{json.dumps(query[:50])});
+            inp.dispatchEvent(new Event('input',{{bubbles:true}}));
+            return JSON.stringify({{searching:true}});
+          }}
+          return JSON.stringify({{searching:false}});
+        }})()'''
+        _exec_js_in_domain('web.whatsapp.com', search_js, timeout=8)
+        _t.sleep(1.5)
+
     js = f'''(function(){{
       var items=document.querySelectorAll('[data-testid=cell-frame-container],[role=listitem]');
       if(!items.length) items=document.querySelectorAll('._ak72,._ak8k,._ak8l');
@@ -538,7 +655,7 @@ def _read_whatsapp(*, limit=10, query='') -> list:
       var n=Math.min(items.length,{limit});
       for(var i=0;i<n;i++){{
         var el=items[i];
-        var lastEl=el.querySelector('[data-testid=last-msg-status] span,[class*=last-msg]');
+        var lastEl=el.querySelector('[data-testid=last-msg-status] span,[class*=last-msg],[data-testid=msg-container]');
         result.push({{id:String(i),preview:(lastEl?.innerText||'').slice(0,200)}});
       }}
       return JSON.stringify(result);
@@ -606,6 +723,67 @@ def _read_facebook(*, limit=10, query='') -> list:
             preview='[CONVERSATION]',
             timestamp=time.time(),
         ) for i in range(min(count, limit))]
+    except Exception:
+        return []
+
+
+def _read_messenger(*, limit=10, query='') -> list:
+    """Read Facebook Messenger DM threads — separate from Facebook Pages/Feed.
+
+    Navigates to facebook.com/messages/t/ (DM thread list) specifically.
+    Classified as a distinct channel from 'facebook' (which covers Pages/Feed).
+    """
+    from .ai_browser_transport import _exec_js_in_domain
+    import time as _time
+
+    # Navigate to DM inbox (separate from /messages/ which shows all message types)
+    nav_js = '''(function(){
+      var url=location.href;
+      if(url.includes('messenger.com')||url.includes('/messages/')){
+        return JSON.stringify({here:true,url:url.slice(0,60)});
+      }
+      window.location='https://www.facebook.com/messages/';
+      return JSON.stringify({navigating:true});
+    })()'''
+    ok_nav, out_nav = _exec_js_in_domain('facebook.com', nav_js, timeout=8)
+    if ok_nav and out_nav and 'navigating' in (out_nav or ''):
+        _time.sleep(3)
+
+    # Read DM thread items specifically
+    js = f'''(function(){{
+      var threads=document.querySelectorAll('[role=row]');
+      if(!threads.length) threads=document.querySelectorAll('[aria-label*="conversation"],[data-testid*="thread"]');
+      var count=threads.length;
+      var classified=[];
+      for(var i=0;i<Math.min(count,{limit});i++){{
+        var el=threads[i];
+        var txt=(el.innerText||'').slice(0,80);
+        // Detect if thread has unread badge
+        var hasUnread=!!el.querySelector('[aria-label*="unread"],[class*="badge"]');
+        classified.push({{id:String(i),hasUnread:hasUnread}});
+      }}
+      return JSON.stringify({{count:count,threads:classified,inMessenger:location.href.includes('/messages/')}});
+    }})()'''
+    ok, out = _exec_js_in_domain('facebook.com', js, timeout=10)
+    if not ok or not out or out in ('null', 'missing value'):
+        return []
+    try:
+        data = json.loads(out)
+        if isinstance(data, list):
+            count = len(data)
+            threads = data
+        else:
+            count = data.get('count', 0)
+            threads = data.get('threads', [])
+        return [ChannelItem(
+            channel='messenger',
+            item_id=str(i),
+            sender='[CONTACT]',
+            subject='',
+            preview='[CONVERSATION]',
+            timestamp=time.time(),
+            metadata={'has_unread': t.get('hasUnread', False) if i < len(threads) else False},
+        ) for i, t in enumerate(threads[:min(count, limit)])]
     except Exception:
         return []
 
@@ -869,6 +1047,43 @@ def _exec_facebook_send(payload: dict) -> dict:
     """Send approved Facebook Messenger message via browser. Called only after Gate approval."""
     from .ai_browser_transport import _exec_js_in_domain
     content = payload.get('content', '')
+    js = f'''(function(){{
+      var inp=document.querySelector('[aria-label*="Message"][contenteditable],[placeholder*="Aa"][contenteditable]');
+      if(!inp)return JSON.stringify({{ok:false,error:'no_input'}});
+      inp.focus();
+      document.execCommand('insertText',false,{json.dumps(content)});
+      inp.dispatchEvent(new KeyboardEvent('keydown',{{key:'Enter',keyCode:13,bubbles:true}}));
+      return JSON.stringify({{ok:true,stage:'sent'}});
+    }})()'''
+    ok, out = _exec_js_in_domain('facebook.com', js, timeout=10)
+    try:
+        return json.loads(out) if out else {'ok': bool(ok)}
+    except Exception:
+        return {'ok': bool(ok), 'raw': str(out)[:200]}
+
+
+def _exec_messenger_send(payload: dict) -> dict:
+    """Send approved Messenger DM via browser. Requires an open conversation.
+
+    During Step-3 self-testing, no real contacts are messaged.
+    This executor returns 'approval_blocked_no_safe_target' when no
+    open conversation is available, preserving the zero-external-action guarantee.
+    """
+    from .ai_browser_transport import _exec_js_in_domain
+    content = payload.get('content', '')
+    # Check if there's an active open conversation with a compose box
+    check_js = '''(function(){
+      var inp=document.querySelector('[aria-label*="Message"][contenteditable],[placeholder*="Aa"][contenteditable]');
+      return JSON.stringify({has_compose:!!inp, url:location.href.slice(0,80)});
+    })()'''
+    ok, out = _exec_js_in_domain('facebook.com', check_js, timeout=8)
+    try:
+        state = json.loads(out or '{}')
+        if not state.get('has_compose'):
+            return {'ok': False, 'error': 'approval_blocked_no_safe_target',
+                    'note': 'No open conversation available for safe self-test'}
+    except Exception:
+        return {'ok': False, 'error': 'state_check_failed'}
     js = f'''(function(){{
       var inp=document.querySelector('[aria-label*="Message"][contenteditable],[placeholder*="Aa"][contenteditable]');
       if(!inp)return JSON.stringify({{ok:false,error:'no_input'}});

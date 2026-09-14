@@ -23,6 +23,7 @@ from zamal_core.channel_adapter import (
     _read_whatsapp,
     _read_calendar,
     _read_facebook,
+    _read_messenger,
     _read_instagram,
     _read_telegram,
     _exec_gmail_send,
@@ -1010,8 +1011,9 @@ class TestDataclasses(unittest.TestCase):
 # ── CHANNELS frozenset ────────────────────────────────────────────────────
 
 class TestChannels(unittest.TestCase):
-    def test_all_six_channels_defined(self):
-        expected = {'telegram', 'gmail', 'calendar', 'whatsapp', 'facebook', 'instagram'}
+    def test_all_channels_defined(self):
+        expected = {'telegram', 'gmail', 'calendar', 'whatsapp',
+                    'facebook', 'messenger', 'instagram'}
         self.assertEqual(ChannelAdapter.CHANNELS, expected)
 
     def test_channels_is_frozenset(self):
@@ -1227,6 +1229,418 @@ class TestProposalRegistry(unittest.TestCase):
     def test_get_proposal_returns_none_for_unknown_id(self):
         result = self.adapter.get_proposal('nonexistent-id-12345')
         self.assertIsNone(result)
+
+
+class TestMessengerChannel(unittest.TestCase):
+    """Messenger is a distinct channel from Facebook."""
+
+    def test_messenger_in_channels_set(self):
+        """'messenger' is a valid channel in ChannelAdapter.CHANNELS."""
+        self.assertIn('messenger', ChannelAdapter.CHANNELS)
+
+    def test_messenger_reader_registered(self):
+        """_get_reader('messenger') returns a callable."""
+        reader = _get_reader('messenger')
+        self.assertTrue(callable(reader))
+        self.assertIs(reader, _read_messenger)
+
+    def test_messenger_executor_registered(self):
+        """_get_executor('messenger', 'send_message') returns a callable."""
+        executor = _get_executor('messenger', 'send_message')
+        self.assertTrue(callable(executor))
+
+    @patch('zamal_core.ai_browser_transport._exec_js_in_domain')
+    def test_read_messenger_returns_contact_tokens(self, mock_js):
+        """_read_messenger returns sender=[CONTACT] and preview=[CONVERSATION]."""
+        mock_js.side_effect = [
+            (True, json.dumps({'here': True, 'url': 'facebook.com/messages/'})),
+            (True, json.dumps({'count': 3, 'threads': [
+                {'id': '0', 'hasUnread': True},
+                {'id': '1', 'hasUnread': False},
+                {'id': '2', 'hasUnread': False},
+            ], 'inMessenger': True})),
+        ]
+        items = _read_messenger(limit=3)
+        self.assertEqual(len(items), 3)
+        for it in items:
+            self.assertEqual(it.channel, 'messenger')
+            self.assertEqual(it.sender, '[CONTACT]')
+            self.assertEqual(it.preview, '[CONVERSATION]')
+
+    def test_messenger_separate_from_facebook(self):
+        """Messenger read uses _read_messenger, not _read_facebook."""
+        self.assertIsNot(_get_reader('messenger'), _get_reader('facebook'))
+        self.assertIs(_get_reader('messenger'), _read_messenger)
+
+    @patch('zamal_core.ai_browser_transport._exec_js_in_domain')
+    def test_messenger_adapter_read_sanitized(self, mock_js):
+        """ChannelAdapter.read('messenger') applies PII masking."""
+        mock_js.side_effect = [
+            (True, json.dumps({'here': True, 'url': 'facebook.com/messages/'})),
+            (True, json.dumps({'count': 2, 'threads': [
+                {'id': '0', 'hasUnread': False},
+                {'id': '1', 'hasUnread': False},
+            ], 'inMessenger': True})),
+        ]
+        adapter = ChannelAdapter()
+        result = adapter.read('messenger', limit=2)
+        self.assertEqual(result.channel, 'messenger')
+        for item in result.items:
+            self.assertNotIn('@', item.sender)
+            self.assertNotIn('+', item.preview)
+
+
+class TestSearchAndSummarize(unittest.TestCase):
+    """Test search() and summarize_items() utility methods."""
+
+    def test_search_wraps_read_with_query(self):
+        """search() calls read() and returns ChannelResult."""
+        adapter = ChannelAdapter()
+        with patch.object(adapter, 'read') as mock_read:
+            mock_read.return_value = ChannelResult(
+                channel='gmail', items=[], count=0, task_id='', privacy_level='PUBLIC')
+            result = adapter.search('gmail', 'job offer', limit=5)
+            mock_read.assert_called_once_with('gmail', limit=5, query='job offer', task_id='')
+        self.assertIsInstance(result, ChannelResult)
+
+    def test_summarize_classifies_job_emails(self):
+        """summarize_items() returns job category for job-related subjects."""
+        adapter = ChannelAdapter()
+        items = [
+            ChannelItem(channel='gmail', item_id='1', sender='[CONTACT]',
+                        subject='Senior job position available',
+                        preview='We are hiring...', timestamp=time.time()),
+            ChannelItem(channel='gmail', item_id='2', sender='[CONTACT]',
+                        subject='Career opportunity at startup',
+                        preview='Join our team...', timestamp=time.time()),
+        ]
+        summary = adapter.summarize_items(items, channel='gmail')
+        self.assertEqual(summary['total'], 2)
+        self.assertIn('job', summary['categories'])
+        self.assertEqual(summary['categories']['job'], 2)
+        self.assertEqual(summary['privacy_level'], 'SANITIZED')
+
+    def test_summarize_classifies_urgent_emails(self):
+        """summarize_items() identifies urgent messages."""
+        adapter = ChannelAdapter()
+        items = [
+            ChannelItem(channel='gmail', item_id='3', sender='[CONTACT]',
+                        subject='URGENT: Action required immediately',
+                        preview='Please respond ASAP', timestamp=time.time()),
+        ]
+        summary = adapter.summarize_items(items)
+        self.assertIn('urgent', summary['categories'])
+
+    def test_summarize_empty_returns_zero(self):
+        """summarize_items([]) returns total=0."""
+        adapter = ChannelAdapter()
+        summary = adapter.summarize_items([])
+        self.assertEqual(summary['total'], 0)
+        self.assertEqual(summary['categories'], {})
+
+
+class TestDraftAndDeleteProposal(unittest.TestCase):
+    """Test draft_reply() and propose_delete_event() methods."""
+
+    def setUp(self):
+        self.adapter = ChannelAdapter()
+
+    def test_draft_reply_creates_proposal(self):
+        """draft_reply() creates an ActionProposal without sending."""
+        with patch.object(self.adapter, '_create_approval', return_value='ap-draft-1'):
+            proposal = self.adapter.draft_reply(
+                'gmail', 'item-123', 'Thank you for your message.',
+                destination='test@example.com')
+        self.assertIsInstance(proposal, ActionProposal)
+        self.assertEqual(proposal.status, 'PENDING')
+        self.assertEqual(proposal.action, 'send_message')
+
+    def test_draft_reply_stored_in_registry(self):
+        """draft_reply() stores the proposal in the registry."""
+        with patch.object(self.adapter, '_create_approval', return_value='ap-draft-2'):
+            proposal = self.adapter.draft_reply(
+                'whatsapp', 'item-456', 'Hello, how can I help?',
+                destination='self')
+        found = self.adapter.get_proposal(proposal.proposal_id)
+        self.assertIsNotNone(found)
+        self.assertEqual(found.channel, 'whatsapp')
+
+    def test_propose_delete_event_creates_proposal(self):
+        """propose_delete_event() creates ActionProposal with action=delete_event."""
+        with patch.object(self.adapter, '_create_approval', return_value='ap-del-1'):
+            proposal = self.adapter.propose_delete_event(
+                'test-event-id-123', 'Zamal Step3 Test Event')
+        self.assertIsInstance(proposal, ActionProposal)
+        self.assertEqual(proposal.action, 'delete_event')
+        self.assertEqual(proposal.channel, 'calendar')
+        self.assertIn('test-event-id-123', proposal.payload.get('event_id', ''))
+
+    def test_propose_delete_rejected_no_action(self):
+        """Rejected delete proposal produces zero external action."""
+        with patch.object(self.adapter, '_create_approval', return_value='ap-del-2'):
+            proposal = self.adapter.propose_delete_event('event-xyz', 'Test Event')
+        result = self.adapter.execute_rejected(proposal, actor='test')
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['external_action'], 'none')
+        self.assertEqual(proposal.status, 'REJECTED')
+
+    def test_rejected_delete_blocks_subsequent_approve(self):
+        """After rejection, execute_approved is blocked for same proposal."""
+        with patch.object(self.adapter, '_create_approval', return_value='ap-del-3'):
+            proposal = self.adapter.propose_delete_event('event-abc', 'Test')
+        self.adapter.execute_rejected(proposal, actor='test')
+        result = self.adapter.execute_approved(
+            proposal, approval_id=proposal.approval_id, actor='test')
+        self.assertFalse(result['ok'])
+        self.assertIn('already_executed', result.get('error', ''))
+
+
+class TestGmailSearch(unittest.TestCase):
+    """Tests for Gmail search query filtering."""
+
+    @patch('zamal_core.ai_browser_transport._exec_js_in_domain')
+    def test_gmail_query_filters_results(self, mock_js):
+        """_read_gmail() with query applies client-side filtering."""
+        mock_js.return_value = (True, json.dumps([
+            {'id': '1', 'subject': 'Job offer at TechCorp', 'preview': 'We are hiring...', 'time': ''},
+            {'id': '2', 'subject': 'Your electricity bill', 'preview': 'Payment due...', 'time': ''},
+        ]))
+        items = _read_gmail(limit=10, query='job')
+        subjects = [it.subject for it in items]
+        self.assertTrue(any('Job' in s or 'job' in s.lower() for s in subjects))
+
+    @patch('zamal_core.ai_browser_transport._exec_js_in_domain')
+    def test_gmail_no_query_returns_all(self, mock_js):
+        """_read_gmail() without query returns all items."""
+        mock_js.return_value = (True, json.dumps([
+            {'id': '1', 'subject': 'Subject A', 'preview': 'A...', 'time': ''},
+            {'id': '2', 'subject': 'Subject B', 'preview': 'B...', 'time': ''},
+        ]))
+        items = _read_gmail(limit=10, query='')
+        self.assertEqual(len(items), 2)
+
+    @patch('zamal_core.ai_browser_transport._exec_js_in_domain')
+    def test_gmail_pii_masked_in_search_results(self, mock_js):
+        """Gmail search results have emails/phones masked."""
+        mock_js.return_value = (True, json.dumps([
+            {'id': '1', 'subject': 'Contact us at test@example.com',
+             'preview': 'Call +1-555-123-4567 for support', 'time': ''},
+        ]))
+        items = _read_gmail(limit=10, query='')
+        for it in items:
+            self.assertNotIn('test@example.com', it.subject)
+            self.assertNotIn('+1-555-123-4567', it.preview)
+
+
+class TestWhatsAppSearch(unittest.TestCase):
+    """Tests for WhatsApp search query support."""
+
+    @patch('zamal_core.ai_browser_transport._exec_js_in_domain')
+    def test_whatsapp_search_calls_js_search(self, mock_js):
+        """_read_whatsapp() with query triggers search box JS."""
+        mock_js.side_effect = [
+            (True, json.dumps({'searching': True})),  # search_js call
+            (True, json.dumps([{'id': '0', 'preview': 'Plumbing service inquiry'}])),
+        ]
+        from zamal_core.channel_adapter import _read_whatsapp
+        items = _read_whatsapp(limit=5, query='plumbing')
+        self.assertGreaterEqual(len(items), 0)
+        # Two calls: search activation + list read
+        self.assertEqual(mock_js.call_count, 2)
+
+    @patch('zamal_core.ai_browser_transport._exec_js_in_domain')
+    def test_whatsapp_no_query_single_js_call(self, mock_js):
+        """_read_whatsapp() without query makes only one JS call."""
+        mock_js.return_value = (True, json.dumps([{'id': '0', 'preview': ''}]))
+        from zamal_core.channel_adapter import _read_whatsapp
+        _read_whatsapp(limit=5, query='')
+        self.assertEqual(mock_js.call_count, 1)
+
+
+class TestTelegramCommands(unittest.TestCase):
+    """Tests for Telegram slash command handling."""
+
+    def setUp(self):
+        import sys, os
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from zamal_core.store import Store
+        from zamal_core.telegram_bot import TelegramBot, TelegramConfig, TelegramAPI
+        from zamal_core.telegram_bot import migrate_telegram, TelegramUpdateDedup
+        from zamal_core.telegram_bot import TelegramCallbackHandler, TelegramMessageRouter
+        import tempfile
+        import pathlib
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = Store(path=os.path.join(self._tmpdir, 'test.db'))
+        migrate_telegram(self._store)
+        self._config = MagicMock(spec=TelegramConfig)
+        self._config.configured = True
+        self._config._token = 'test-token-1234567890'
+        self._config._allowed = {'12345'}
+        self._config.is_allowed = lambda cid: str(cid) in self._config._allowed
+        self._api = MagicMock(spec=TelegramAPI)
+        self._api.send_message = MagicMock(return_value={'ok': True})
+        self._api.get_updates = MagicMock(return_value={'ok': True, 'result': []})
+        self._bot = TelegramBot.__new__(TelegramBot)
+        self._bot._s = self._store
+        self._bot._cfg = self._config
+        self._bot._api = self._api
+        self._bot._dedup = TelegramUpdateDedup(self._store)
+        self._bot._callbacks = TelegramCallbackHandler(self._store, cfg=self._config)
+        self._bot._router = TelegramMessageRouter(
+            self._store, self._api, pathlib.Path(self._tmpdir) / 'inbox')
+
+    def tearDown(self):
+        self._store.close()
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_start_command_sends_welcome(self):
+        """/start command sends welcome message to authorized chat."""
+        update = {
+            'update_id': 10001,
+            'message': {
+                'message_id': 1, 'date': int(time.time()),
+                'chat': {'id': 12345, 'type': 'private'},
+                'from': {'id': 12345},
+                'text': '/start',
+            }
+        }
+        result = self._bot.process_update(update)
+        self.assertEqual(result.get('outcome'), 'COMMAND')
+        self._api.send_message.assert_called()
+        # Check all calls (command sends its message; _reply may also send)
+        all_calls = str(self._api.send_message.call_args_list)
+        self.assertIn('Zamal', all_calls)
+
+    def test_help_command_returns_command_list(self):
+        """/help command sends list of commands."""
+        update = {
+            'update_id': 10002,
+            'message': {
+                'message_id': 2, 'date': int(time.time()),
+                'chat': {'id': 12345, 'type': 'private'},
+                'from': {'id': 12345},
+                'text': '/help',
+            }
+        }
+        result = self._bot.process_update(update)
+        self.assertEqual(result.get('outcome'), 'COMMAND')
+        all_calls = str(self._api.send_message.call_args_list)
+        self.assertIn('/status', all_calls)
+
+    def test_status_command_returns_status(self):
+        """/status command returns task/control status."""
+        update = {
+            'update_id': 10003,
+            'message': {
+                'message_id': 3, 'date': int(time.time()),
+                'chat': {'id': 12345, 'type': 'private'},
+                'from': {'id': 12345},
+                'text': '/status',
+            }
+        }
+        result = self._bot.process_update(update)
+        self.assertEqual(result.get('outcome'), 'COMMAND')
+        self._api.send_message.assert_called()
+
+    def test_unauthorized_command_rejected(self):
+        """Command from unauthorized chat is rejected."""
+        update = {
+            'update_id': 10004,
+            'message': {
+                'message_id': 4, 'date': int(time.time()),
+                'chat': {'id': 99999, 'type': 'private'},
+                'from': {'id': 99999},
+                'text': '/status',
+            }
+        }
+        result = self._bot.process_update(update)
+        self.assertEqual(result.get('outcome'), 'DENIED')
+
+    def test_regular_text_creates_task(self):
+        """Regular text (not a command) creates a task."""
+        update = {
+            'update_id': 10005,
+            'message': {
+                'message_id': 5, 'date': int(time.time()),
+                'chat': {'id': 12345, 'type': 'private'},
+                'from': {'id': 12345},
+                'text': 'Search my Gmail for job offers',
+            }
+        }
+        result = self._bot.process_update(update)
+        self.assertIn(result.get('outcome'), ('SUCCESS', 'RECORDED'))
+
+
+class TestNotifyMethods(unittest.TestCase):
+    """Tests for TelegramBot notification methods."""
+
+    def setUp(self):
+        import sys, os
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from zamal_core.store import Store
+        from zamal_core.telegram_bot import TelegramBot, TelegramConfig, TelegramAPI
+        from zamal_core.telegram_bot import migrate_telegram
+        import tempfile
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = Store(path=os.path.join(self._tmpdir, 'test.db'))
+        migrate_telegram(self._store)
+        self._config = MagicMock(spec=TelegramConfig)
+        self._config.configured = True
+        self._config._allowed = {'12345'}
+        self._api = MagicMock(spec=TelegramAPI)
+        self._api.send_message = MagicMock(return_value={'ok': True})
+        self._bot = TelegramBot.__new__(TelegramBot)
+        self._bot._s = self._store
+        self._bot._cfg = self._config
+        self._bot._api = self._api
+
+    def tearDown(self):
+        self._store.close()
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_notify_approval_required_sends_message(self):
+        """notify_approval_required() sends a message with approval keyboard."""
+        result = self._bot.notify_approval_required(
+            channel='gmail', action_type='send_message',
+            sanitized_preview='[ZAMAL TEST] Hello',
+            approval_id='ap-test-123', task_id='task-abc')
+        self.assertTrue(result)
+        self._api.send_message.assert_called_once()
+        call_args = str(self._api.send_message.call_args)
+        self.assertIn('gmail', call_args)
+        self.assertIn('send_message', call_args)
+
+    def test_notify_approval_required_no_pii_in_message(self):
+        """Approval notice does not expose email addresses or phone numbers."""
+        self._bot.notify_approval_required(
+            channel='whatsapp', action_type='send_message',
+            sanitized_preview='[ZAMAL TEST] Test message',
+            approval_id='ap-pii-456')
+        call_args = str(self._api.send_message.call_args)
+        self.assertNotIn('@example.com', call_args)
+        self.assertNotIn('+974', call_args)
+
+    def test_notify_action_required_sends_blocker_info(self):
+        """notify_action_required() sends channel and blocker type."""
+        result = self._bot.notify_action_required(
+            channel='instagram', blocker_type='CAPTCHA',
+            task_id='task-cap-789',
+            instructions='Please complete verification at instagram.com')
+        self.assertTrue(result)
+        call_args = str(self._api.send_message.call_args)
+        self.assertIn('instagram', call_args)
+        self.assertIn('CAPTCHA', call_args)
+
+    def test_notify_unconfigured_returns_false(self):
+        """Notifications return False when bot is not configured."""
+        self._config.configured = False
+        result = self._bot.notify_approval_required(
+            'gmail', 'send', 'preview', 'ap-123')
+        self.assertFalse(result)
 
 
 if __name__ == '__main__':

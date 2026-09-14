@@ -186,6 +186,16 @@ class TelegramMessageRouter:
         self._inbox.mkdir(parents=True, exist_ok=True)
         self._gw = InboundEventGateway(store)
 
+    # ── Command table ─────────────────────────────────────────────────────
+    _COMMANDS = {
+        '/start':  'welcome',
+        '/help':   'help',
+        '/status': 'status',
+        '/stop':   'stop_status',
+        '/approve': 'approve_cmd',
+        '/reject':  'reject_cmd',
+    }
+
     def route(self, chat_id, update_id, msg):
         if 'text' in msg:
             return self._text(chat_id, update_id, msg['text'])
@@ -202,9 +212,120 @@ class TelegramMessageRouter:
         return failure('NOT_CONFIGURED', 'unsupported_message_type')
 
     def _text(self, chat_id, update_id, text):
+        stripped = text.strip()
+        cmd_lower = stripped.lower().split()[0] if stripped else ''
+        # Handle slash commands
+        if cmd_lower in self._COMMANDS:
+            return self._handle_command(chat_id, update_id, stripped, cmd_lower)
         return self._gw.receive('task_create', 'telegram',
                                 {'text': text, 'type': 'generic', 'project': 'operator'},
                                 f'telegram:text:{update_id}')
+
+    def _handle_command(self, chat_id, update_id, text, cmd):
+        """Handle slash command — never creates external actions."""
+        if cmd == '/start':
+            msg = (
+                '*Zamal AI Operator*\n'
+                'Remote control channel active.\n\n'
+                'Commands:\n'
+                '/help — list commands\n'
+                '/status — channel & task status\n'
+                '/stop — emergency stop status\n'
+                '/approve <id> — approve a pending action\n'
+                '/reject <id> — reject a pending action\n\n'
+                'Or send any text to create a task.'
+            )
+            self._api.send_message(chat_id, msg)
+            return {'outcome': 'COMMAND', 'command': 'start', 'ok': True}
+
+        if cmd == '/help':
+            msg = (
+                '*Commands*\n'
+                '/start — show welcome\n'
+                '/status — connection & task overview\n'
+                '/stop — check/clear emergency stop\n'
+                '/approve <approval\\_id> — approve queued action\n'
+                '/reject <approval\\_id> — reject queued action\n'
+                'Or send any instruction as a task.'
+            )
+            self._api.send_message(chat_id, msg)
+            return {'outcome': 'COMMAND', 'command': 'help', 'ok': True}
+
+        if cmd == '/status':
+            return self._cmd_status(chat_id, update_id)
+
+        if cmd == '/stop':
+            return self._cmd_stop_status(chat_id, update_id)
+
+        if cmd in ('/approve', '/reject'):
+            parts = text.split(maxsplit=1)
+            approval_id = parts[1].strip() if len(parts) > 1 else ''
+            if not approval_id:
+                self._api.send_message(chat_id, f'Usage: {cmd} <approval_id>')
+                return {'outcome': 'COMMAND', 'command': cmd, 'ok': False, 'error': 'missing_id'}
+            choice = 'APPROVE' if cmd == '/approve' else 'REJECT'
+            try:
+                approval = self._s.approval(approval_id)
+                task_id = approval['task_id']
+                action_id = approval['action_id']
+                from .gateway import GatewayWorker
+                gate = GatewayWorker(self._s).gate()
+                actor = f'telegram:{chat_id}'
+                gate.resolve_approval(approval_id, choice,
+                                      task_id=task_id, action_id=action_id,
+                                      actor=actor)
+                self._api.send_message(chat_id,
+                    f'{"Approved" if choice=="APPROVE" else "Rejected"} action `{action_id[:8]}…`')
+                return {'outcome': 'SUCCESS', 'choice': choice, 'approval_id': approval_id, 'ok': True}
+            except Exception as exc:
+                self._api.send_message(chat_id, f'Could not {cmd[1:]}: {str(exc)[:100]}')
+                return {'outcome': 'DENIED', 'ok': False, 'error': str(exc)[:100]}
+
+        return failure('NOT_CONFIGURED', f'unknown_command:{cmd}')
+
+    def _cmd_status(self, chat_id, update_id):
+        """Return sanitized status summary — no PII, no tokens."""
+        try:
+            from .safety import Controls
+            ctrl = Controls(self._s)
+            st = ctrl.status()
+            stop = st.get('stop_everything', 0)
+            pause = st.get('pause_external_actions', 0)
+            # Task count
+            tasks = self._s.db.execute(
+                "SELECT state, COUNT(*) c FROM tasks GROUP BY state"
+            ).fetchall()
+            task_lines = '\n'.join(f'  {r["state"]}: {r["c"]}' for r in tasks) or '  (none)'
+            lines = [
+                '*Zamal Operator Status*',
+                f'Emergency stop: {"ON" if stop else "off"}',
+                f'External pause: {"ON" if pause else "off"}',
+                '*Tasks:*',
+                task_lines,
+            ]
+            self._api.send_message(chat_id, '\n'.join(lines))
+        except Exception as exc:
+            self._api.send_message(chat_id, f'Status unavailable: {str(exc)[:80]}')
+        return {'outcome': 'COMMAND', 'command': 'status', 'ok': True, 'update_id': update_id}
+
+    def _cmd_stop_status(self, chat_id, update_id):
+        """Report emergency stop state — no mutation."""
+        try:
+            from .safety import Controls
+            st = Controls(self._s).status()
+            stop = st.get('stop_everything', 0)
+            pause = st.get('pause_external_actions', 0)
+            ro = st.get('read_only_mode', 0)
+            lines = [
+                '*Emergency Controls*',
+                f'stop\\_everything: {"*ACTIVE*" if stop else "off"}',
+                f'pause\\_external\\_actions: {"*ACTIVE*" if pause else "off"}',
+                f'read\\_only\\_mode: {"*ACTIVE*" if ro else "off"}',
+            ]
+            self._api.send_message(chat_id, '\n'.join(lines))
+        except Exception as exc:
+            self._api.send_message(chat_id, f'Controls unavailable: {str(exc)[:80]}')
+        return {'outcome': 'COMMAND', 'command': 'stop_status', 'ok': True}
 
     def _voice(self, chat_id, update_id, file_id, caption):
         try:
@@ -439,6 +560,61 @@ class TelegramBot:
         if result.get('outcome') == 'DENIED':
             return 'Denied — stale or replayed approval'
         return 'Processed'
+
+    def notify_approval_required(self, channel: str, action_type: str,
+                                  sanitized_preview: str, approval_id: str,
+                                  task_id: str = '') -> bool:
+        """Send APPROVAL_REQUIRED notice to all authorized chats.
+
+        No real content, sender names, or private identifiers are included.
+        Returns True if at least one message was sent successfully.
+        """
+        if not self._cfg.configured:
+            return False
+        preview_safe = sanitized_preview[:200].replace('[', '\\[').replace('`', "'")
+        msg = (
+            f'*ACTION REQUIRES APPROVAL*\n'
+            f'Channel: {channel}\n'
+            f'Action: {action_type}\n'
+            f'Preview: `{preview_safe}`\n'
+            f'Approval ID: `{approval_id[:16]}…`\n'
+            f'Task: `{task_id[:8]}…`' if task_id else
+            f'*ACTION REQUIRES APPROVAL*\n'
+            f'Channel: {channel}\n'
+            f'Action: {action_type}\n'
+            f'Preview: `{preview_safe}`\n'
+            f'Approval ID: `{approval_id[:16]}…`'
+        )
+        keyboard = _approval_keyboard(approval_id)
+        sent = False
+        for chat_id in self._cfg._allowed:
+            r = self._api.send_message(chat_id, msg, reply_markup=keyboard)
+            if r.get('ok'):
+                sent = True
+        return sent
+
+    def notify_action_required(self, channel: str, blocker_type: str,
+                                task_id: str, instructions: str = '') -> bool:
+        """Send ACTION_REQUIRED (CAPTCHA/OTP/session) notice to authorized chats.
+
+        Returns True if at least one message was sent successfully.
+        """
+        if not self._cfg.configured:
+            return False
+        inst_safe = instructions[:200] if instructions else 'Please complete the human action and retry.'
+        msg = (
+            f'*HUMAN ACTION REQUIRED*\n'
+            f'Channel: {channel}\n'
+            f'Blocker: {blocker_type}\n'
+            f'Task: `{task_id[:8]}…`\n'
+            f'{inst_safe}'
+        )
+        sent = False
+        for chat_id in self._cfg._allowed:
+            r = self._api.send_message(chat_id, msg)
+            if r.get('ok'):
+                sent = True
+        return sent
 
     def poll(self, offset=0, poll_timeout=30, max_iterations=None):
         """Long-polling loop. max_iterations is for tests; None = forever."""

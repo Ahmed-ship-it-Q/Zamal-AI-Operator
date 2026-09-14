@@ -222,8 +222,70 @@ def _check_channel(channel: str) -> str:
         return 'unconfigured'
 
 
+def _read_github_status() -> dict:
+    """Read GitHub status via git CLI — no credentials exposed."""
+    result = {
+        'remote': 'unconfigured',
+        'branch': '',
+        'ahead': 0,
+        'sha': '',
+        'last_commit': '',
+        'ci_check_url': '',
+    }
+    try:
+        if not shutil.which('git'):
+            return result
+        base = ['git', '-C', str(_OPERATOR_ROOT)]
+        remote_r = subprocess.run(base + ['remote', 'get-url', 'origin'],
+                                  capture_output=True, text=True, timeout=5)
+        if remote_r.returncode == 0:
+            remote_url = remote_r.stdout.strip()
+            # Sanitize — remove embedded credentials
+            remote_safe = re.sub(r'https?://[^@/]+@', 'https://[CREDENTIALS]@', remote_url)
+            result['remote'] = remote_safe or 'configured'
+        sha_r = subprocess.run(base + ['rev-parse', 'HEAD'],
+                               capture_output=True, text=True, timeout=5)
+        if sha_r.returncode == 0:
+            result['sha'] = sha_r.stdout.strip()[:40]
+        branch_r = subprocess.run(base + ['branch', '--show-current'],
+                                  capture_output=True, text=True, timeout=5)
+        if branch_r.returncode == 0:
+            result['branch'] = branch_r.stdout.strip()
+        log_r = subprocess.run(base + ['log', '-1', '--pretty=%s'],
+                               capture_output=True, text=True, timeout=5)
+        if log_r.returncode == 0:
+            result['last_commit'] = log_r.stdout.strip()[:100]
+        ahead_r = subprocess.run(base + ['rev-list', '--count', 'origin/main..HEAD'],
+                                 capture_output=True, text=True, timeout=5)
+        if ahead_r.returncode == 0:
+            try:
+                result['ahead'] = int(ahead_r.stdout.strip())
+            except ValueError:
+                pass
+        # Build CI URL (GitHub Actions) from remote URL
+        if 'github.com' in str(result.get('remote', '')):
+            m = re.search(r'github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$', str(result.get('remote', '')))
+            if m:
+                slug = m.group(1)
+                sha = result.get('sha', '')
+                if sha:
+                    result['ci_check_url'] = f'https://github.com/{slug}/actions'
+    except Exception:
+        pass
+    return result
+
+
+_status_cache: dict = {}
+_status_cache_ts: float = 0.0
+_STATUS_CACHE_TTL: float = 120.0  # seconds — prevents repeated slow browser calls in tests
+
+
 def get_connection_status():
     """Return dict of integration statuses. All values must be in _VALID_STATUSES."""
+    global _status_cache, _status_cache_ts
+    now = time.monotonic()
+    if _status_cache and (now - _status_cache_ts) < _STATUS_CACHE_TTL:
+        return dict(_status_cache)
     statuses = {
         'codex': _check_codex(),
         'claude': _check_claude(),
@@ -238,12 +300,15 @@ def get_connection_status():
         'ch_calendar': _check_channel('calendar'),
         'ch_whatsapp': _check_channel('whatsapp'),
         'ch_facebook': _check_channel('facebook'),
+        'ch_messenger': _check_channel('messenger'),
         'ch_instagram': _check_channel('instagram'),
     }
     # Safety assertion — all values must be valid
     for k, v in statuses.items():
         if v not in _VALID_STATUSES:
             statuses[k] = 'unconfigured'
+    _status_cache = dict(statuses)
+    _status_cache_ts = now
     return statuses
 
 
@@ -1076,6 +1141,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_ai_providers()
             elif path == '/api/channel/proposals':
                 self._handle_channel_proposals()
+            elif path == '/api/github/status':
+                self._handle_github_status()
+            elif path == '/api/n8n/workflows':
+                self._handle_n8n_workflows()
             else:
                 self._error(404, 'Not found')
         except Exception as exc:
@@ -1531,6 +1600,44 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             result = ca.execute_rejected(proposal, actor=actor)
             self._send_json(result)
+        except Exception as exc:
+            self._error(500, str(exc))
+
+
+    def _handle_github_status(self):
+        """GET /api/github/status — read-only GitHub status via git CLI."""
+        try:
+            status = _read_github_status()
+            self._send_json(_sanitize_obj(status))
+        except Exception as exc:
+            self._error(500, str(exc))
+
+    def _handle_n8n_workflows(self):
+        """GET /api/n8n/workflows — list n8n workflows via API."""
+        try:
+            n8n_key = os.environ.get('N8N_API_KEY', '')
+            if not n8n_key:
+                # Try loading from config
+                key_path = _OPERATOR_ROOT / 'config' / 'n8n_api_key.txt'
+                if key_path.exists():
+                    n8n_key = key_path.read_text().strip()
+            if not n8n_key:
+                self._send_json({'error': 'n8n_api_key_not_configured', 'workflows': []})
+                return
+            req = urllib.request.Request(
+                'http://127.0.0.1:5678/api/v1/workflows',
+                headers={'X-N8N-API-KEY': n8n_key}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read(65536))
+                workflows = data.get('data', []) if isinstance(data, dict) else data
+                summary = [{
+                    'id': w.get('id', ''),
+                    'name': w.get('name', ''),
+                    'active': w.get('active', False),
+                    'updatedAt': w.get('updatedAt', ''),
+                } for w in workflows]
+                self._send_json({'workflows': summary, 'count': len(summary)})
         except Exception as exc:
             self._error(500, str(exc))
 
