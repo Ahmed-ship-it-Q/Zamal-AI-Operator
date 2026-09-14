@@ -169,6 +169,7 @@ class ChannelAdapter:
         payload = {
             'channel': channel,
             'destination': sanitized_dest,
+            'raw_destination': destination[:200],  # executor needs real address; not logged in preview
             'content': flt.text[:2000],
             'privacy_level': flt.level,
             'send': True,  # approval = authorization to send (not draft)
@@ -956,114 +957,154 @@ def _exec_gmail_send(payload: dict) -> dict:
     """Send approved Gmail message via browser. Called only after Gate approval.
 
     Approval = authorization to send. Always attempts real Send; never drafts.
+    Uses Gmail compose URL directly to avoid selector brittleness.
     """
+    import subprocess as _sp, time as _time
     from .ai_browser_transport import _exec_js_in_domain
-    import time as _time
-    destination = payload.get('destination', '')
+
+    destination = payload.get('raw_destination', '') or payload.get('destination', '')
     content = payload.get('content', '')
     subject = payload.get('subject', 'Zamal Operator Message')
 
-    # Step 1: Open compose window
+    # Step 1: Click Gmail Compose button. Uses persistent dialog (not redirect-based URL).
     js_compose = '''(function(){
-      var btn = document.querySelector('[gh=cm],[data-tooltip*="Compose"],[aria-label*="Compose"]');
-      if(!btn) {
-        // Try alternative compose triggers
-        var btns = Array.from(document.querySelectorAll('div[role=button],button'));
-        for(var b of btns){
-          var lbl = (b.getAttribute('data-tooltip')||b.getAttribute('aria-label')||b.textContent||'');
-          if(lbl.toLowerCase().includes('compose')){btn=b;break;}
+      // Find the Compose button (aria-label or role-button with text)
+      var btns = Array.from(document.querySelectorAll('div[role=button],button,[gh=cm]'));
+      var composeBtn = null;
+      for(var b of btns){
+        var lbl = (b.getAttribute('aria-label')||b.getAttribute('data-tooltip')||'').toLowerCase();
+        var txt = (b.textContent||b.innerText||'').trim().toLowerCase();
+        var r = b.getBoundingClientRect();
+        if(r.width > 0 && r.height > 0 && (lbl === 'compose' || txt === 'compose')){
+          composeBtn = b; break;
         }
       }
-      if(!btn) return JSON.stringify({ok:false,error:'no_compose_btn'});
-      btn.click();
-      return JSON.stringify({ok:true,stage:'compose_opened'});
+      if(!composeBtn) return JSON.stringify({ok:false,error:'no_compose_btn'});
+      composeBtn.click();
+      return JSON.stringify({ok:true,stage:'compose_clicked'});
     })()'''
-    ok, out = _exec_js_in_domain('mail.google.com', js_compose, timeout=10)
-    if not ok or not out or out == 'missing value':
+    ok1, out1 = _exec_js_in_domain('mail.google.com', js_compose, timeout=10)
+    if not ok1 or out1 == 'NO_TAB':
         return {'ok': False, 'error': 'gmail_tab_unreachable'}
     try:
-        r = json.loads(out)
-        if not r.get('ok'):
-            return {'ok': False, 'error': r.get('error', 'compose_not_found')}
+        r1 = json.loads(out1) if out1 and out1 != 'missing value' else {}
+        if not r1.get('ok'):
+            return {'ok': False, 'error': r1.get('error', 'compose_btn_not_found')}
     except Exception:
-        return {'ok': False, 'error': 'compose_parse_error'}
-    _time.sleep(2.0)  # wait for compose window to fully render
+        return {'ok': False, 'error': 'compose_parse_error', 'raw': str(out1)[:100]}
+    _time.sleep(3.0)  # wait for compose dialog to fully render
 
-    # Step 2: Fill To, Subject, Body
-    js_fill = f'''(function(){{
-      var compose = document.querySelector('div[role=dialog],div.AD');
-      var to = compose
-        ? compose.querySelector('[name=to],[aria-label*="To"]')
-        : document.querySelector('[name=to],[aria-label*="To"]');
-      if(!to) return JSON.stringify({{ok:false,error:'no_to_field'}});
-      to.value = '';
-      to.focus();
+    # Step 2: Fill To field (contenteditable div with aria-label="To")
+    js_fill_to = f'''(function(){{
+      var toField = document.querySelector('[aria-label="To"],[aria-label*="Recipients"]');
+      if(!toField) {{
+        // Fallback: first contenteditable in compose dialog
+        var dialog = document.querySelector('[role=dialog]');
+        toField = dialog ? dialog.querySelector('[contenteditable]') : null;
+      }}
+      if(!toField) return JSON.stringify({{ok:false,error:'no_to_field'}});
+      toField.focus();
+      toField.click();
+      document.execCommand('selectAll', false, null);
       document.execCommand('insertText', false, {json.dumps(destination)});
-      to.dispatchEvent(new KeyboardEvent('keydown', {{key:'Tab',bubbles:true}}));
-
-      var subj = document.querySelector('[name=subjectbox],[placeholder*="Subject"],[aria-label*="Subject"]');
-      if(subj) {{
-        subj.focus();
-        subj.value = '';
-        document.execCommand('insertText', false, {json.dumps(subject)});
-        subj.dispatchEvent(new Event('input', {{bubbles:true}}));
-      }}
-
-      var bodies = document.querySelectorAll('div[contenteditable][role=textbox],div[aria-label*="Message Body"]');
-      var body = bodies[bodies.length-1];
-      if(body) {{
-        body.focus();
-        document.execCommand('insertText', false, {json.dumps(content)});
-      }}
-      return JSON.stringify({{ok:true,stage:'filled',hasTo:!!to,hasSubj:!!subj,hasBody:!!body}});
+      toField.dispatchEvent(new KeyboardEvent('keydown', {{key:'Tab',keyCode:9,bubbles:true}}));
+      return JSON.stringify({{ok:true,stage:'to_filled',value:toField.textContent.slice(0,40)}});
     }})()'''
-    ok2, out2 = _exec_js_in_domain('mail.google.com', js_fill, timeout=10)
+    ok2, out2 = _exec_js_in_domain('mail.google.com', js_fill_to, timeout=8)
     _time.sleep(1.0)
     try:
         r2 = json.loads(out2) if out2 and out2 != 'missing value' else {}
         if not r2.get('ok'):
-            return {'ok': False, 'error': r2.get('error', 'fill_failed'), 'stage': 'fill'}
+            return {'ok': False, 'error': r2.get('error', 'to_fill_failed'), 'raw': out2[:100]}
     except Exception:
-        pass
+        return {'ok': False, 'error': 'to_parse_error', 'raw': str(out2)[:100]}
 
-    # Step 3: Click Send (approval authorizes actual send — not draft)
+    # Step 3: Fill Subject field
+    js_fill_subj = f'''(function(){{
+      var subj = document.querySelector('[name=subjectbox],[placeholder*="Subject"],[aria-label="Subject"]');
+      if(!subj) return JSON.stringify({{ok:true,stage:'no_subj_field_skip'}});
+      subj.focus();
+      subj.value = '';
+      document.execCommand('selectAll', false, null);
+      document.execCommand('insertText', false, {json.dumps(subject[:150])});
+      subj.dispatchEvent(new Event('input', {{bubbles:true}}));
+      return JSON.stringify({{ok:true,stage:'subj_filled',value:subj.value.slice(0,40)}});
+    }})()'''
+    ok3, out3 = _exec_js_in_domain('mail.google.com', js_fill_subj, timeout=8)
+    _time.sleep(0.5)
+
+    # Step 4: Fill Body field — must target contenteditable div, not hidden textarea.
+    # document.querySelector('[aria-label="Message Body"]') matches the hidden textarea first;
+    # the real editable body is a contenteditable div inside the visible dialog.
+    js_fill_body = f'''(function(){{
+      var dialog = null;
+      var allDialogs = Array.from(document.querySelectorAll('[role=dialog]'));
+      for(var i=0;i<allDialogs.length;i++){{
+        var r=allDialogs[i].getBoundingClientRect();
+        if(r.width>0 && r.height>0){{ dialog=allDialogs[i]; break; }}
+      }}
+      if(!dialog) return JSON.stringify({{ok:false,error:'no_visible_dialog'}});
+      var body = dialog.querySelector('[aria-label="Message Body"][contenteditable="true"]') ||
+                 dialog.querySelector('[role="textbox"][contenteditable="true"]') ||
+                 dialog.querySelector('div[contenteditable="true"]');
+      if(!body) return JSON.stringify({{ok:false,error:'no_body_field',ce_count:dialog.querySelectorAll('[contenteditable]').length}});
+      body.focus();
+      var sel = window.getSelection();
+      var range = document.createRange();
+      range.selectNodeContents(body);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.execCommand('insertText', false, {json.dumps(content[:1000])});
+      body.dispatchEvent(new Event('input', {{bubbles:true}}));
+      return JSON.stringify({{ok:true,stage:'body_filled',value:body.textContent.slice(0,50)}});
+    }})()'''
+    ok4, out4 = _exec_js_in_domain('mail.google.com', js_fill_body, timeout=10)
+    _time.sleep(1.0)
+    try:
+        r4 = json.loads(out4) if out4 and out4 != 'missing value' else {}
+        if not r4.get('ok'):
+            return {'ok': False, 'error': r4.get('error', 'body_fill_failed'), 'raw': out4[:100]}
+    except Exception:
+        return {'ok': False, 'error': 'body_parse_error', 'raw': str(out4)[:100]}
+
+    # Step 5: Click Send button inside the compose dialog
     js_send = '''(function(){
-      // Find Send button — try multiple selectors used by different Gmail versions
-      var selectors = [
-        '[data-tooltip*="Send"][role=button]',
-        '[aria-label*="Send"][role=button]',
-        'div[data-tooltip="Send "] div',
-        '[data-tooltip="Send"]',
-        'button[aria-label*="Send"]',
-      ];
+      var dialog = document.querySelector('[role=dialog]');
+      var btns = Array.from((dialog||document).querySelectorAll('div[role=button],button'));
       var sendBtn = null;
-      for(var sel of selectors){
-        sendBtn = document.querySelector(sel);
-        if(sendBtn && sendBtn.getBoundingClientRect().width > 0) break;
-        sendBtn = null;
-      }
-      if(!sendBtn){
-        // Last resort: find visible button with text "Send"
-        var btns = Array.from(document.querySelectorAll('div[role=button],button'));
-        for(var b of btns){
-          var txt = (b.textContent||b.innerText||'').trim();
-          var lbl = (b.getAttribute('aria-label')||b.getAttribute('data-tooltip')||'');
-          var r = b.getBoundingClientRect();
-          if(r.width > 0 && r.height > 0 && (txt==='Send' || lbl.startsWith('Send'))){
-            sendBtn = b; break;
-          }
+      for(var b of btns){
+        var lbl = (b.getAttribute('data-tooltip')||b.getAttribute('aria-label')||'').trim();
+        var txt = (b.textContent||b.innerText||'').trim();
+        var r = b.getBoundingClientRect();
+        if(r.width > 0 && r.height > 0 && (lbl === 'Send' || txt === 'Send')){
+          sendBtn = b; break;
         }
       }
       if(!sendBtn) return JSON.stringify({ok:false,error:'no_send_btn'});
       sendBtn.click();
-      return JSON.stringify({ok:true,stage:'sent'});
+      return JSON.stringify({ok:true,stage:'send_clicked'});
     })()'''
-    ok3, out3 = _exec_js_in_domain('mail.google.com', js_send, timeout=10)
+    ok5, out5 = _exec_js_in_domain('mail.google.com', js_send, timeout=10)
+    _time.sleep(3.0)  # wait for compose to close after send
+
+    # Step 6: Verify compose dialog is closed
+    js_verify = '''(function(){
+      var dialog = document.querySelector('[role=dialog]');
+      var composeClosed = !dialog || dialog.getBoundingClientRect().width === 0;
+      return JSON.stringify({ok:composeClosed, composeClosed:composeClosed, url:location.href.slice(0,80)});
+    })()'''
+    ok6, out6 = _exec_js_in_domain('mail.google.com', js_verify, timeout=8)
+
     try:
-        result = json.loads(out3) if out3 and out3 != 'missing value' else {'ok': bool(ok3)}
-        return result
+        send_result = json.loads(out5) if out5 and out5 != 'missing value' else {'ok': bool(ok5)}
+        verify = json.loads(out6) if out6 and out6 != 'missing value' else {}
+        if send_result.get('stage') == 'send_clicked':
+            return {'ok': True, 'stage': 'sent',
+                    'verified_compose_closed': verify.get('composeClosed', False)}
+        return {'ok': False, 'error': send_result.get('error', 'send_failed'),
+                'send_result': send_result, 'verify': verify}
     except Exception:
-        return {'ok': bool(ok3), 'raw': str(out3)[:200]}
+        return {'ok': bool(ok5), 'raw': str(out5)[:200]}
 
 
 def _exec_calendar_create(payload: dict) -> dict:

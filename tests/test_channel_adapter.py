@@ -819,14 +819,18 @@ class TestGetExecutor(unittest.TestCase):
 class TestExecGmailSend(unittest.TestCase):
     @patch(_JS_PATCH)
     def test_returns_dict_on_success(self, mock_js):
-        # compose opened, form filled, send clicked
+        # 6 calls: compose_click, fill_to, fill_subj, fill_body, send, verify
         mock_js.side_effect = [
-            (True, json.dumps({'ok': True, 'stage': 'compose_opened'})),
-            (True, json.dumps({'ok': True, 'stage': 'filled'})),
-            (True, json.dumps({'ok': True, 'stage': 'sent'})),
+            (True, json.dumps({'ok': True, 'stage': 'compose_clicked'})),
+            (True, json.dumps({'ok': True, 'stage': 'to_filled', 'value': 'x@y.com'})),
+            (True, json.dumps({'ok': True, 'stage': 'subj_filled', 'value': 'Test'})),
+            (True, json.dumps({'ok': True, 'stage': 'body_filled', 'value': 'Hi'})),
+            (True, json.dumps({'ok': True, 'stage': 'send_clicked'})),
+            (True, json.dumps({'ok': True, 'composeClosed': True, 'url': 'mail.google.com'})),
         ]
         result = _exec_gmail_send({'destination': 'x@y.com', 'content': 'Hi', 'subject': 'Test'})
         self.assertIsInstance(result, dict)
+        self.assertTrue(result.get('ok'))
 
     @patch(_JS_PATCH)
     def test_returns_error_when_compose_fails(self, mock_js):
