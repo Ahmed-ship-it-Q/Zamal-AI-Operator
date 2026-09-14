@@ -653,6 +653,10 @@ _HTML_UI = '''<!DOCTYPE html>
   .badge-REJECTED    { background: #742a2a; color: #fed7d7; }
   .badge-FAILED      { background: #742a2a; color: #fc8181; }
   .badge-RECOVERING  { background: #744210; color: #faf089; }
+  .badge-PENDING     { background: #744210; color: #fbd38d; }
+  .badge-EXECUTING   { background: #322659; color: #b794f4; }
+  .badge-EXECUTED    { background: #1a365d; color: #76e4f7; }
+  .badge-EXPIRED     { background: #2d3748; color: #718096; }
   .detail-section { margin-bottom: 14px; }
   .detail-section h3 { font-size: 11px; font-weight: 700; color: #718096;
                        text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
@@ -816,7 +820,7 @@ function refreshTasks() {
   apiFetch('/api/tasks?limit=50').then(function(tasks) {
     var html = tasks.map(function(t) {
       var sel = t.id === selectedTaskId ? ' selected' : '';
-      return '<div class="task-item' + sel + '" onclick="selectTask(\'' + t.id + '\')">' +
+      return '<div class="task-item' + sel + '" onclick="selectTask(\\'' + t.id + '\\')">' +
         '<div class="task-kind">' + (t.kind || t.task_type || '') + '</div>' +
         '<div class="task-cmd">' + escHtml(t.summary || t.command || '') + '</div>' +
         badgeHtml(t.state) +
@@ -851,8 +855,8 @@ function refreshTaskDetail(id) {
         approvalHtml = '<div class="detail-section"><h3>Approval Required</h3>' +
           '<div class="detail-text">' + escHtml(JSON.stringify(a.payload, null, 2)) + '</div>' +
           '<div class="approval-actions">' +
-          '<button class="approve-btn" onclick="resolveApproval(\'' + a.approval.id + '\',\'' + a.id + '\',\'APPROVE\')">Approve</button>' +
-          '<button class="reject-btn" onclick="resolveApproval(\'' + a.approval.id + '\',\'' + a.id + '\',\'REJECT\')">Reject</button>' +
+          '<button class="approve-btn" data-apid="' + a.approval.id + '" data-aid="' + a.id + '" data-choice="APPROVE">Approve</button>' +
+          '<button class="reject-btn" data-apid="' + a.approval.id + '" data-aid="' + a.id + '" data-choice="REJECT">Reject</button>' +
           '</div></div>';
       }
     }
@@ -942,7 +946,7 @@ function refreshAIProviders() {
     var html = Object.keys(providers).map(function(k) {
       var p = providers[k];
       var st = p.status || 'NOT_CONFIGURED';
-      var preview = p.last_response_preview ? ' · "' + escHtml(p.last_response_preview.substring(0,40)) + '..."' : '';
+      var preview = p.last_response_preview ? ' - "' + escHtml(p.last_response_preview.substring(0,40)) + '..."' : '';
       return '<div class="ai-provider-row">' +
         '<span class="ai-provider-name">' + escHtml(p.name || k) + '</span>' +
         '<span class="ai-status ai-' + st + '">' + st.replace(/_/g,' ') + '</span>' +
@@ -961,7 +965,7 @@ function submitAITask() {
   var prompt = document.getElementById('ai-task-input').value.trim();
   if (!prompt) { showMsg('Please enter a prompt', true); return; }
   var taskType = document.getElementById('ai-task-type').value;
-  document.getElementById('ai-task-status').textContent = 'Routing…';
+  document.getElementById('ai-task-status').textContent = 'Routing...';
   apiFetch('/api/ai-task', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -969,7 +973,7 @@ function submitAITask() {
   }).then(function(d) {
     _aiTaskId = d.task_id;
     document.getElementById('ai-task-input').value = '';
-    document.getElementById('ai-task-status').textContent = 'Task ' + _aiTaskId.substring(0,8) + ' — routing via AI…';
+    document.getElementById('ai-task-status').textContent = 'Task ' + _aiTaskId.substring(0,8) + ' -- routing via AI...';
     showMsg('AI task started');
     refreshTasks();
     selectTask(_aiTaskId);
@@ -983,8 +987,8 @@ function submitAITask() {
           var fr = t.final_result || t.context && t.context.final_result;
           if (fr && fr.provider) {
             document.getElementById('ai-task-status').textContent =
-              'Done via ' + fr.provider + ' · Privacy: ' + (fr.privacy_level||'?') +
-              ' · Fallbacks: ' + (fr.fallback_history||[]).length;
+              'Done via ' + fr.provider + ' | Privacy: ' + (fr.privacy_level||'?') +
+              ' | Fallbacks: ' + (fr.fallback_history||[]).length;
           } else {
             document.getElementById('ai-task-status').textContent = 'Completed (state: ' + t.state + ')';
           }
@@ -1017,53 +1021,120 @@ function createChannelProposal() {
   apiFetch('/api/channel/propose',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({channel:ch,destination:dest,content:content})})
   .then(function(d){
-    status.textContent='PENDING: '+d.proposal_id.substring(0,8)+' | ch='+d.channel+' | approval='+d.approval_id.substring(0,8);
+    status.innerHTML='<span style="color:#68d391">PENDING</span> -- '+
+      'proposal: <b>'+d.proposal_id.substring(0,8)+'...</b> | '+
+      'approval: <b>'+d.approval_id.substring(0,8)+'...</b> | '+
+      'ch: '+d.channel+' | dest: '+escHtml(d.destination||'')+'<br>'+
+      'task_id: '+(d.task_id||'-')+' | provenance: channel_adapter | dup_guard: open';
     refreshProposals();
   }).catch(function(e){status.textContent='ERROR: '+e.message;});
+}
+
+function fmtTs(ts) {
+  if(!ts) return '';
+  var d = new Date(ts*1000);
+  return d.toISOString().replace('T',' ').substring(0,19)+' UTC';
 }
 
 function refreshProposals() {
   apiFetch('/api/channel/proposals').then(function(proposals) {
     var el=document.getElementById('proposals-list');
-    if(!proposals.length){el.textContent='No proposals';return;}
+    if(!proposals||!proposals.length){el.innerHTML='<span style="color:#718096">No proposals</span>';return;}
     el.innerHTML=proposals.map(function(p){
       var id8=p.proposal_id.substring(0,8);
+      var aid8=(p.approval_id||'').substring(0,8);
+      var tid=p.task_id||'-';
+      var ts=fmtTs(p.timestamp);
+      var dupIcon=p.duplicate_prevention?'[L]':'';
+      var exResult='';
+      if(p.executor_result&&Object.keys(p.executor_result).length){
+        var er=p.executor_result;
+        exResult='<div style="font-size:10px;color:#a0aec0;margin-top:2px;font-family:monospace">'+
+          'executor: '+escHtml(JSON.stringify(er).substring(0,120))+'</div>';
+      }
       var btns='';
       if(p.status==='PENDING'){
-        btns='<button onclick="approveProposal(\''+p.proposal_id+'\')" style="background:#276749;color:#c6f6d5;border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:10px;margin-right:4px">APPROVE</button>'+
-             '<button onclick="rejectProposal(\''+p.proposal_id+'\')" style="background:#742a2a;color:#fed7d7;border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:10px">REJECT</button>';
+        btns='<button data-pid="'+p.proposal_id+'" data-act="approve" '+
+          'style="background:#276749;color:#c6f6d5;border:none;padding:3px 8px;border-radius:3px;cursor:pointer;font-size:10px;margin-right:4px">'+
+          'APPROVE</button>'+
+          '<button data-pid="'+p.proposal_id+'" data-act="reject" '+
+          'style="background:#742a2a;color:#fed7d7;border:none;padding:3px 8px;border-radius:3px;cursor:pointer;font-size:10px">'+
+          'REJECT</button>';
       }
-      return '<div style="border:1px solid #2d3748;border-radius:4px;padding:6px;margin-bottom:4px">'+
-        '<div style="font-size:10px;color:#a0aec0">'+id8+' | '+p.channel+' → '+p.destination+'</div>'+
-        '<div style="font-size:11px;margin:2px 0">'+escHtml(p.preview.substring(0,100))+'</div>'+
-        '<div style="display:flex;align-items:center;gap:6px;margin-top:4px">'+
-          '<span class="badge badge-'+p.status+'">'+p.status+'</span>'+btns+
+      var statusColor={'PENDING':'#fbd38d','EXECUTING':'#b794f4','COMPLETED':'#9ae6b4',
+        'FAILED':'#fc8181','REJECTED':'#fed7d7','EXPIRED':'#718096','EXECUTED':'#76e4f7'}[p.status]||'#a0aec0';
+      return '<div style="border:1px solid #2d3748;border-radius:6px;padding:8px;margin-bottom:6px;background:#1a1f2e">'+
+        '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'+
+          '<span class="badge badge-'+p.status+'">'+p.status+'</span>'+
+          '<span style="font-size:10px;color:#718096">'+dupIcon+' '+p.channel.toUpperCase()+' &gt; '+escHtml(p.action)+'</span>'+
+          btns+
         '</div>'+
-        '<div id="pr-result-'+p.proposal_id.substring(0,8)+'" style="font-size:10px;color:#68d391;margin-top:2px"></div>'+
+        '<div style="font-size:11px;color:#e2e8f0;margin:3px 0;word-break:break-word">'+
+          escHtml(p.preview.substring(0,150))+'</div>'+
+        '<div style="font-family:monospace;font-size:9px;color:#718096;margin-top:4px;display:grid;grid-template-columns:1fr 1fr;gap:2px">'+
+          '<span>proposal: <b>'+id8+'...</b></span>'+
+          '<span>approval: <b>'+aid8+'...</b></span>'+
+          '<span>task_id: '+escHtml(tid.substring(0,20))+'</span>'+
+          '<span>dest: '+escHtml(p.destination.substring(0,25))+'</span>'+
+          '<span>provenance: '+escHtml(p.provenance||'channel_adapter')+'</span>'+
+          '<span>dup_guard: '+(p.duplicate_prevention?'<b style="color:#68d391">LOCKED</b>':'open')+'</span>'+
+          '<span style="grid-column:1/-1">created: '+ts+'</span>'+
+        '</div>'+
+        exResult+
+        '<div id="pr-result-'+id8+'" style="font-size:10px;color:#68d391;margin-top:4px"></div>'+
       '</div>';
     }).join('');
   }).catch(function(){});
 }
 
 function approveProposal(proposalId) {
+  var el=document.getElementById('pr-result-'+proposalId.substring(0,8));
+  if(el) el.textContent='Executing...';
   apiFetch('/api/channel/approve',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({proposal_id:proposalId,actor:'cc_user'})})
   .then(function(d){
-    var el=document.getElementById('pr-result-'+proposalId.substring(0,8));
-    if(el) el.textContent='APPROVED: '+JSON.stringify(d).substring(0,80);
-    refreshProposals();
-  }).catch(function(e){showMsg('Approve error: '+e.message,true);});
+    var status=d.status||'EXECUTED';
+    var result=d.result?JSON.stringify(d.result).substring(0,100):'';
+    if(el) el.innerHTML='<span style="color:'+(d.ok?'#68d391':'#fc8181')+'">'+
+      status+': '+escHtml(result)+'</span>';
+    setTimeout(refreshProposals,500);
+  }).catch(function(e){
+    if(el) el.textContent='Error: '+e.message;
+    showMsg('Approve error: '+e.message,true);
+  });
 }
 
 function rejectProposal(proposalId) {
+  var el=document.getElementById('pr-result-'+proposalId.substring(0,8));
+  if(el) el.textContent='Rejecting...';
   apiFetch('/api/channel/reject',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({proposal_id:proposalId,actor:'cc_user'})})
   .then(function(d){
-    var el=document.getElementById('pr-result-'+proposalId.substring(0,8));
-    if(el) el.textContent='REJECTED: external_action='+d.external_action;
-    refreshProposals();
-  }).catch(function(e){showMsg('Reject error: '+e.message,true);});
+    if(el) el.innerHTML='<span style="color:#68d391">REJECTED -- external_action: '+
+      escHtml(d.external_action||'none')+'</span>';
+    setTimeout(refreshProposals,500);
+  }).catch(function(e){
+    if(el) el.textContent='Error: '+e.message;
+    showMsg('Reject error: '+e.message,true);
+  });
 }
+
+// Delegated click handler for proposal approve/reject buttons
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('[data-pid][data-act]');
+  if(btn) {
+    var pid = btn.getAttribute('data-pid');
+    var act = btn.getAttribute('data-act');
+    if(act === 'approve') approveProposal(pid);
+    else if(act === 'reject') rejectProposal(pid);
+    return;
+  }
+  // Approval action buttons (task detail panel)
+  var abtn = e.target.closest('[data-apid][data-aid][data-choice]');
+  if(abtn) {
+    resolveApproval(abtn.getAttribute('data-apid'), abtn.getAttribute('data-aid'), abtn.getAttribute('data-choice'));
+  }
+});
 
 setInterval(refresh, 5000);
 setInterval(refreshProposals, 3000);
@@ -1519,6 +1590,9 @@ class _Handler(BaseHTTPRequestHandler):
                 'task_id': p.task_id,
                 'approval_id': p.approval_id,
                 'timestamp': p.timestamp,
+                'executor_result': getattr(p, 'executor_result', {}),
+                'provenance': 'channel_adapter',
+                'duplicate_prevention': p.proposal_id in ca._executed,
             } for p in proposals])
         except Exception as exc:
             self._error(500, str(exc))
@@ -1535,7 +1609,14 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             from .channel_adapter import get_channel_adapter
             ca = get_channel_adapter()
-            if channel == 'calendar':
+            action_hint = str(body.get('action', '')).strip()
+            if channel == 'calendar' and action_hint == 'delete_event':
+                proposal = ca.propose_delete_event(
+                    event_id=str(body.get('event_id', destination)).strip(),
+                    reason=content[:200],
+                    task_id=task_id,
+                )
+            elif channel == 'calendar':
                 proposal = ca.propose_calendar_event(
                     title=content[:200],
                     start_dt=str(body.get('start_dt', '')),

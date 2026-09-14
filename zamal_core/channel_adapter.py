@@ -82,7 +82,8 @@ class ActionProposal:
     approval_id: str      # Gate approval ID
     payload: dict         # sanitized action payload
     timestamp: float
-    status: str = 'PENDING'   # PENDING | APPROVED | REJECTED | EXECUTED | EXPIRED
+    status: str = 'PENDING'   # PENDING | APPROVED | REJECTED | EXECUTING | COMPLETED | FAILED | EXPIRED
+    executor_result: dict = field(default_factory=dict)  # result from executor
 
 
 # ── Channel Adapter ───────────────────────────────────────────────────────────
@@ -170,6 +171,7 @@ class ChannelAdapter:
             'destination': sanitized_dest,
             'content': flt.text[:2000],
             'privacy_level': flt.level,
+            'send': True,  # approval = authorization to send (not draft)
         }
         approval_id = self._create_approval(
             task_id=task_id,
@@ -305,6 +307,40 @@ class ChannelAdapter:
             self._proposals[proposal_id] = proposal
         return proposal
 
+    def propose_delete_event(self, event_id: str, reason: str = '',
+                             *, task_id: str = '', actor: str = 'operator') -> ActionProposal:
+        """Propose deleting a calendar event by event_id. No deletion until approval."""
+        proposal_id = str(uuid.uuid4())
+        payload = {
+            'channel': 'calendar',
+            'event_id': event_id,
+            'reason': reason[:200],
+        }
+        preview = f'DELETE event_id={event_id[:20]} reason={reason[:80]}'
+        approval_id = self._create_approval(
+            task_id=task_id,
+            action='delete_event',
+            channel='calendar',
+            destination='Google Calendar',
+            preview=preview,
+            payload=payload,
+            actor=actor,
+        )
+        proposal = ActionProposal(
+            proposal_id=proposal_id,
+            channel='calendar',
+            action='delete_event',
+            destination='Google Calendar',
+            preview=preview,
+            task_id=task_id,
+            approval_id=approval_id,
+            payload=payload,
+            timestamp=time.time(),
+        )
+        with self._lock:
+            self._proposals[proposal_id] = proposal
+        return proposal
+
     # ── Execution (post-approval) ──────────────────────────────────────────
 
     def execute_approved(self, proposal: ActionProposal,
@@ -334,16 +370,28 @@ class ChannelAdapter:
             return {'ok': False, 'error': 'proposal_rejected'}
 
         try:
-            executor = _get_executor(proposal.channel, proposal.action)
-            result = executor(proposal.payload)
-            proposal.status = 'EXECUTED'
+            proposal.status = 'EXECUTING'
             with self._lock:
                 if proposal.proposal_id in self._proposals:
-                    self._proposals[proposal.proposal_id].status = 'EXECUTED'
-            return {'ok': True, 'result': result, 'proposal_id': proposal.proposal_id,
-                    'approval_id': approval_id, 'actor': actor}
-        except Exception as exc:
+                    self._proposals[proposal.proposal_id].status = 'EXECUTING'
+            executor = _get_executor(proposal.channel, proposal.action)
+            result = executor(proposal.payload)
+            exec_ok = result.get('ok', True) if isinstance(result, dict) else bool(result)
+            final_status = 'COMPLETED' if exec_ok else 'FAILED'
+            proposal.status = final_status
+            proposal.executor_result = result if isinstance(result, dict) else {}
             with self._lock:
+                if proposal.proposal_id in self._proposals:
+                    p = self._proposals[proposal.proposal_id]
+                    p.status = final_status
+                    p.executor_result = proposal.executor_result
+            return {'ok': True, 'result': result, 'proposal_id': proposal.proposal_id,
+                    'approval_id': approval_id, 'actor': actor, 'status': final_status}
+        except Exception as exc:
+            proposal.status = 'FAILED'
+            with self._lock:
+                if proposal.proposal_id in self._proposals:
+                    self._proposals[proposal.proposal_id].status = 'FAILED'
                 self._executed.discard(proposal.proposal_id)
             return {'ok': False, 'error': str(exc)[:300]}
 
@@ -905,122 +953,287 @@ def _notify_instagram_captcha():
 # ── Channel-specific executors (called only after Gate approval) ──────────
 
 def _exec_gmail_send(payload: dict) -> dict:
-    """Send approved Gmail message via browser. Called only after Gate approval."""
+    """Send approved Gmail message via browser. Called only after Gate approval.
+
+    Approval = authorization to send. Always attempts real Send; never drafts.
+    """
     from .ai_browser_transport import _exec_js_in_domain
+    import time as _time
     destination = payload.get('destination', '')
     content = payload.get('content', '')
-    subject = payload.get('subject', 'Zamal Operator Test')
-    # Open compose
-    js = f'''(function(){{
-      var btn=document.querySelector('[gh=cm],[data-tooltip*=Compose],[aria-label*=Compose]');
-      if(!btn)return JSON.stringify({{ok:false,error:'no_compose_btn'}});
+    subject = payload.get('subject', 'Zamal Operator Message')
+
+    # Step 1: Open compose window
+    js_compose = '''(function(){
+      var btn = document.querySelector('[gh=cm],[data-tooltip*="Compose"],[aria-label*="Compose"]');
+      if(!btn) {
+        // Try alternative compose triggers
+        var btns = Array.from(document.querySelectorAll('div[role=button],button'));
+        for(var b of btns){
+          var lbl = (b.getAttribute('data-tooltip')||b.getAttribute('aria-label')||b.textContent||'');
+          if(lbl.toLowerCase().includes('compose')){btn=b;break;}
+        }
+      }
+      if(!btn) return JSON.stringify({ok:false,error:'no_compose_btn'});
       btn.click();
-      return JSON.stringify({{ok:true,stage:'compose_opened'}});
-    }})()'''
-    ok, out = _exec_js_in_domain('mail.google.com', js, timeout=10)
-    if not ok:
-        return {'ok': False, 'error': 'compose_failed'}
-    import time as _time; _time.sleep(1.5)
-    # Fill compose form
-    js2 = f'''(function(){{
-      var to=document.querySelector('[name=to],[aria-label*="To"]');
-      var subj=document.querySelector('[name=subjectbox],[placeholder*=Subject]');
-      var body=document.querySelector('[aria-label*="Message Body"],div[contenteditable][role=textbox]');
-      if(!to)return JSON.stringify({{ok:false,error:'no_to_field'}});
-      to.value={json.dumps(destination)};
-      to.dispatchEvent(new Event('input',{{bubbles:true}}));
-      if(subj){{subj.value={json.dumps(subject)};subj.dispatchEvent(new Event('input',{{bubbles:true}}));}}
-      if(body){{body.focus();document.execCommand('insertText',false,{json.dumps(content)});}}
-      return JSON.stringify({{ok:true,stage:'filled'}});
-    }})()'''
-    _exec_js_in_domain('mail.google.com', js2, timeout=10)
-    _time.sleep(0.5)
-    # Save as draft (not send) — safe self-test: only send after explicit approval with send=true
-    js3 = f'''(function(){{
-      var send_flag={json.dumps(str(payload.get('send', False)))};
-      if(send_flag==='True'){{
-        var send=document.querySelector('[data-tooltip*=Send] div,[aria-label*="Send"]');
-        if(send){{send.click();return JSON.stringify({{ok:true,stage:'sent'}});}}
-      }}
-      var close=document.querySelector('[aria-label*=discard],[data-tooltip*=discard],[aria-label*=Discard]');
-      var moreOpts=document.querySelector('[aria-label*=More]');
-      // Save draft: close compose (it auto-saves)
-      var closeBtn=document.querySelector('[aria-label*=Close],[data-tooltip*=Close],[class*=Ha]');
-      if(closeBtn){{closeBtn.click();return JSON.stringify({{ok:true,stage:'draft_saved'}});}}
-      return JSON.stringify({{ok:true,stage:'compose_open_draft_pending'}});
-    }})()'''
-    ok3, out3 = _exec_js_in_domain('mail.google.com', js3, timeout=10)
+      return JSON.stringify({ok:true,stage:'compose_opened'});
+    })()'''
+    ok, out = _exec_js_in_domain('mail.google.com', js_compose, timeout=10)
+    if not ok or not out or out == 'missing value':
+        return {'ok': False, 'error': 'gmail_tab_unreachable'}
     try:
-        return json.loads(out3) if out3 else {'ok': bool(ok3), 'stage': 'draft_attempted'}
+        r = json.loads(out)
+        if not r.get('ok'):
+            return {'ok': False, 'error': r.get('error', 'compose_not_found')}
+    except Exception:
+        return {'ok': False, 'error': 'compose_parse_error'}
+    _time.sleep(2.0)  # wait for compose window to fully render
+
+    # Step 2: Fill To, Subject, Body
+    js_fill = f'''(function(){{
+      var compose = document.querySelector('div[role=dialog],div.AD');
+      var to = compose
+        ? compose.querySelector('[name=to],[aria-label*="To"]')
+        : document.querySelector('[name=to],[aria-label*="To"]');
+      if(!to) return JSON.stringify({{ok:false,error:'no_to_field'}});
+      to.value = '';
+      to.focus();
+      document.execCommand('insertText', false, {json.dumps(destination)});
+      to.dispatchEvent(new KeyboardEvent('keydown', {{key:'Tab',bubbles:true}}));
+
+      var subj = document.querySelector('[name=subjectbox],[placeholder*="Subject"],[aria-label*="Subject"]');
+      if(subj) {{
+        subj.focus();
+        subj.value = '';
+        document.execCommand('insertText', false, {json.dumps(subject)});
+        subj.dispatchEvent(new Event('input', {{bubbles:true}}));
+      }}
+
+      var bodies = document.querySelectorAll('div[contenteditable][role=textbox],div[aria-label*="Message Body"]');
+      var body = bodies[bodies.length-1];
+      if(body) {{
+        body.focus();
+        document.execCommand('insertText', false, {json.dumps(content)});
+      }}
+      return JSON.stringify({{ok:true,stage:'filled',hasTo:!!to,hasSubj:!!subj,hasBody:!!body}});
+    }})()'''
+    ok2, out2 = _exec_js_in_domain('mail.google.com', js_fill, timeout=10)
+    _time.sleep(1.0)
+    try:
+        r2 = json.loads(out2) if out2 and out2 != 'missing value' else {}
+        if not r2.get('ok'):
+            return {'ok': False, 'error': r2.get('error', 'fill_failed'), 'stage': 'fill'}
+    except Exception:
+        pass
+
+    # Step 3: Click Send (approval authorizes actual send — not draft)
+    js_send = '''(function(){
+      // Find Send button — try multiple selectors used by different Gmail versions
+      var selectors = [
+        '[data-tooltip*="Send"][role=button]',
+        '[aria-label*="Send"][role=button]',
+        'div[data-tooltip="Send "] div',
+        '[data-tooltip="Send"]',
+        'button[aria-label*="Send"]',
+      ];
+      var sendBtn = null;
+      for(var sel of selectors){
+        sendBtn = document.querySelector(sel);
+        if(sendBtn && sendBtn.getBoundingClientRect().width > 0) break;
+        sendBtn = null;
+      }
+      if(!sendBtn){
+        // Last resort: find visible button with text "Send"
+        var btns = Array.from(document.querySelectorAll('div[role=button],button'));
+        for(var b of btns){
+          var txt = (b.textContent||b.innerText||'').trim();
+          var lbl = (b.getAttribute('aria-label')||b.getAttribute('data-tooltip')||'');
+          var r = b.getBoundingClientRect();
+          if(r.width > 0 && r.height > 0 && (txt==='Send' || lbl.startsWith('Send'))){
+            sendBtn = b; break;
+          }
+        }
+      }
+      if(!sendBtn) return JSON.stringify({ok:false,error:'no_send_btn'});
+      sendBtn.click();
+      return JSON.stringify({ok:true,stage:'sent'});
+    })()'''
+    ok3, out3 = _exec_js_in_domain('mail.google.com', js_send, timeout=10)
+    try:
+        result = json.loads(out3) if out3 and out3 != 'missing value' else {'ok': bool(ok3)}
+        return result
     except Exception:
         return {'ok': bool(ok3), 'raw': str(out3)[:200]}
 
 
 def _exec_calendar_create(payload: dict) -> dict:
-    """Create approved calendar event via browser. Called only after Gate approval."""
+    """Create approved calendar event via browser. Uses URL navigation to avoid
+    appointment-editor redirect from the Create button.
+    """
+    import subprocess as _sp, time as _t
     from .ai_browser_transport import _exec_js_in_domain
+
     title = payload.get('title', 'Zamal Operator Test Event')
-    # Click Create button
-    js = '''(function(){
-      var newBtn=document.querySelector('[aria-label*="Create"],[class*=SaGBd],[class*=T3JNCD]');
-      if(!newBtn) newBtn=document.querySelector('[data-view-type] button');
-      if(newBtn){newBtn.click();return JSON.stringify({ok:true,stage:'new_event_clicked'});}
-      return JSON.stringify({ok:false,error:'no_create_btn'});
-    })()'''
-    ok, out = _exec_js_in_domain('calendar.google.com', js, timeout=10)
-    if not ok:
-        return {'ok': False, 'error': 'calendar_create_failed'}
-    import time as _t; _t.sleep(1.2)
-    # Fill title
-    js2 = f'''(function(){{
-      var title=document.querySelector('[placeholder*="Add title"],[aria-label*="Add title"]');
-      if(title){{
-        title.focus();
-        document.execCommand('selectAll',false,null);
-        document.execCommand('insertText',false,{json.dumps(title[:200])});
-        title.dispatchEvent(new Event('input',{{bubbles:true}}));
-        return JSON.stringify({{ok:true,stage:'title_filled'}});
+    start_dt = payload.get('start_dt', '')
+    end_dt = payload.get('end_dt', '')
+
+    # Navigate Calendar tab directly to the new-event editor URL
+    nav_script = '''osascript -e 'tell application "Google Chrome"
+      repeat with w in windows
+        repeat with t in tabs of w
+          if (URL of t) contains "calendar.google.com" then
+            set URL of t to "https://calendar.google.com/calendar/u/0/r/eventedit"
+            return "navigated"
+          end if
+        end repeat
+      end repeat
+      return "no_tab"
+    end tell' '''
+    r = _sp.run(nav_script, shell=True, capture_output=True, text=True, timeout=10)
+    if 'no_tab' in (r.stdout or ''):
+        return {'ok': False, 'error': 'no_calendar_tab'}
+    _t.sleep(7.0)  # wait for SPA event editor to fully render (Google Calendar needs ~6s)
+
+    # Fill title in the event editor
+    js_title = f'''(function(){{
+      var inp = document.querySelector('input[name="text"],input[placeholder*="title" i],[aria-label*="title" i]');
+      if(!inp) {{
+        var inputs = document.querySelectorAll('input[type="text"],input:not([type])');
+        if(inputs.length) inp = inputs[0];
       }}
-      return JSON.stringify({{ok:false,error:'no_title_field'}});
+      if(!inp) return JSON.stringify({{ok:false,error:'no_title_input'}});
+      inp.focus();
+      inp.select();
+      document.execCommand('selectAll', false, null);
+      document.execCommand('insertText', false, {json.dumps(title[:200])});
+      inp.dispatchEvent(new Event('input', {{bubbles:true}}));
+      return JSON.stringify({{ok:true,stage:'title_filled',value:inp.value.slice(0,60)}});
     }})()'''
-    ok2, out2 = _exec_js_in_domain('calendar.google.com', js2, timeout=10)
-    _t.sleep(0.5)
-    # Save event
-    js3 = '''(function(){
-      var save=document.querySelector('[jsname="M2UYVd"],[aria-label*=Save],[data-view-type] [jsname]');
-      if(save){save.click();return JSON.stringify({ok:true,stage:'saved'});}
+    ok2, out2 = _exec_js_in_domain('calendar.google.com', js_title, timeout=10)
+    _t.sleep(0.8)
+
+    # Click Save button
+    js_save = '''(function(){
+      var btns = Array.from(document.querySelectorAll('button,[role="button"]'));
+      for(var b of btns){
+        var txt = (b.textContent||b.innerText||'').trim();
+        var lbl = (b.getAttribute('aria-label')||'');
+        var r = b.getBoundingClientRect();
+        if(r.width > 0 && (txt === 'Save' || lbl === 'Save')){
+          b.click();
+          return JSON.stringify({ok:true,stage:'saved',btnText:txt});
+        }
+      }
       return JSON.stringify({ok:false,error:'no_save_btn'});
     })()'''
-    ok3, out3 = _exec_js_in_domain('calendar.google.com', js3, timeout=10)
+    ok3, out3 = _exec_js_in_domain('calendar.google.com', js_save, timeout=10)
+    _t.sleep(2.0)  # wait for save to complete and navigate back
+
+    # Verify the event was created by checking the calendar for the title
+    js_verify = f'''(function(){{
+      var found = document.body.innerHTML.includes({json.dumps(title[:30])});
+      var url = location.href.slice(0,80);
+      return JSON.stringify({{created:found, url:url}});
+    }})()'''
+    ok4, out4 = _exec_js_in_domain('calendar.google.com', js_verify, timeout=8)
+
     try:
-        return json.loads(out3) if out3 else {'ok': bool(ok3)}
-    except Exception:
+        save_result = json.loads(out3) if out3 and out3 != 'missing value' else {'ok': bool(ok3)}
+        verify_result = json.loads(out4) if out4 and out4 != 'missing value' else {}
+        if save_result.get('ok') or verify_result.get('created'):
+            return {'ok': True, 'stage': 'created', 'verified_in_dom': verify_result.get('created', False)}
+        return {'ok': False, 'error': save_result.get('error', 'save_failed'), 'verify': verify_result}
+    except Exception as e:
         return {'ok': bool(ok3), 'raw': str(out3)[:200]}
 
 
 def _exec_calendar_delete(payload: dict) -> dict:
-    """Delete a calendar event by event_id via browser. Called only after Gate approval."""
+    """Delete a calendar event by data-eventid via browser.
+    Clicks on the event chip to open popup, then clicks the trash/delete icon.
+    """
+    import subprocess as _sp, time as _t
     from .ai_browser_transport import _exec_js_in_domain
+
     event_id = payload.get('event_id', '')
-    # Find the event and click delete
-    js = f'''(function(){{
-      var el=document.querySelector('[data-eventid="{event_id}"]');
-      if(!el)return JSON.stringify({{ok:false,error:'event_not_found'}});
-      el.click();
-      return JSON.stringify({{ok:true,stage:'event_clicked'}});
+    if not event_id:
+        return {'ok': False, 'error': 'no_event_id_in_payload'}
+
+    # Ensure calendar is on main week view
+    nav_script = '''osascript -e 'tell application "Google Chrome"
+      repeat with w in windows
+        repeat with t in tabs of w
+          if (URL of t) contains "calendar.google.com" then
+            set URL of t to "https://calendar.google.com/calendar/u/0/r/week"
+            return "navigated"
+          end if
+        end repeat
+      end repeat
+      return "no_tab"
+    end tell' '''
+    r = _sp.run(nav_script, shell=True, capture_output=True, text=True, timeout=10)
+    if 'no_tab' in (r.stdout or ''):
+        return {'ok': False, 'error': 'no_calendar_tab'}
+    _t.sleep(4.0)  # wait for week view to load
+
+    # Click the event chip with matching data-eventid to open the popup
+    js_click_chip = f'''(function(){{
+      var eid = {json.dumps(event_id)};
+      var chip = document.querySelector('[data-eventid="'+eid+'"]');
+      if(!chip) return JSON.stringify({{ok:false,error:'chip_not_found',eid:eid.substring(0,20)}});
+      chip.click();
+      return JSON.stringify({{ok:true,stage:'chip_clicked'}});
     }})()'''
-    ok, out = _exec_js_in_domain('calendar.google.com', js, timeout=10)
-    import time as _t; _t.sleep(1)
-    js2 = '''(function(){
-      var del=document.querySelector('[data-id*=delete],[aria-label*=Delete],[jsname*=delete]');
-      if(del){del.click();return JSON.stringify({ok:true,stage:'deleted'});}
-      return JSON.stringify({ok:false,error:'no_delete_btn'});
-    })()'''
-    ok2, out2 = _exec_js_in_domain('calendar.google.com', js2, timeout=10)
+    ok2, out2 = _exec_js_in_domain('calendar.google.com', js_click_chip, timeout=8)
+    _t.sleep(1.5)  # wait for popup to appear
+
     try:
-        return json.loads(out2) if out2 else {'ok': bool(ok2)}
+        r2 = json.loads(out2) if out2 and out2 != 'missing value' else {}
+        if not r2.get('ok'):
+            return {'ok': False, 'error': r2.get('error', 'chip_click_failed'), 'raw': out2[:200]}
     except Exception:
-        return {'ok': bool(ok2)}
+        return {'ok': False, 'error': 'chip_click_parse_error', 'raw': str(out2)[:200]}
+
+    # Click trash/delete icon in the popup (aria-label contains "Delete" or "delete")
+    js_del = '''(function(){
+      var btns = Array.from(document.querySelectorAll('button,[role="button"]'));
+      for(var b of btns){
+        var lbl = (b.getAttribute('aria-label')||'').toLowerCase();
+        var txt = (b.textContent||b.innerText||'').trim().toLowerCase();
+        var r = b.getBoundingClientRect();
+        if(r.width > 0 && r.height > 0 && (lbl.includes('delete') || txt === 'delete')){
+          b.click();
+          return JSON.stringify({ok:true,stage:'delete_clicked',aria:b.getAttribute('aria-label')});
+        }
+      }
+      // Also try trash icon by title or data attributes
+      var trashIcons = Array.from(document.querySelectorAll('[title*="Delete" i],[data-tooltip*="Delete" i]'));
+      for(var t of trashIcons){
+        var r = t.getBoundingClientRect();
+        if(r.width > 0 && r.height > 0){ t.click(); return JSON.stringify({ok:true,stage:'trash_icon_clicked'}); }
+      }
+      return JSON.stringify({ok:false,error:'no_delete_btn',visibleBtns:btns.filter(function(b){var r=b.getBoundingClientRect();return r.width>0;}).map(function(b){return b.getAttribute('aria-label')||b.textContent.substring(0,15);}).slice(0,10)});
+    })()'''
+    ok3, out3 = _exec_js_in_domain('calendar.google.com', js_del, timeout=8)
+    _t.sleep(2.0)
+
+    # Verify: event chip should be gone from DOM
+    js_verify = f'''(function(){{
+      var eid = {json.dumps(event_id)};
+      var still = !!document.querySelector('[data-eventid="'+eid+'"]');
+      var url = location.href.slice(0,80);
+      return JSON.stringify({{deleted:!still, still_in_dom:still, url:url}});
+    }})()'''
+    ok4, out4 = _exec_js_in_domain('calendar.google.com', js_verify, timeout=8)
+
+    try:
+        del_result = json.loads(out3) if out3 and out3 != 'missing value' else {'ok': bool(ok3)}
+        verify = json.loads(out4) if out4 and out4 != 'missing value' else {}
+        if del_result.get('ok') or verify.get('deleted'):
+            return {'ok': True, 'stage': 'deleted', 'verified_gone': verify.get('deleted', False)}
+        return {'ok': False, 'error': del_result.get('error', 'delete_failed'),
+                'del_result': del_result, 'verify': verify}
+    except Exception:
+        return {'ok': bool(ok3), 'raw': str(out3)[:200]}
 
 
 def _exec_whatsapp_send(payload: dict) -> dict:
