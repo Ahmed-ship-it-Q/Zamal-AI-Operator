@@ -746,6 +746,7 @@ _HTML_UI = '''<!DOCTYPE html>
       <option value="gmail">Gmail</option>
       <option value="whatsapp">WhatsApp</option>
       <option value="facebook">Facebook</option>
+      <option value="messenger">Messenger</option>
       <option value="instagram">Instagram</option>
       <option value="calendar">Calendar</option>
     </select>
