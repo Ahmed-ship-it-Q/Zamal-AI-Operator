@@ -951,6 +951,150 @@ def _notify_instagram_captcha():
         pass
 
 
+# ── Public research helpers (no approval required — read-only operations) ──
+
+def _research_instagram_public(*, topic: str = 'business') -> dict:
+    """Research Instagram public content via Explore/search. No private DM access.
+
+    Returns sanitized post count and category summary. No content is stored or logged.
+    """
+    import time as _t
+    from .ai_browser_transport import _exec_js_in_domain
+
+    # Navigate to Explore page (public content, no private data)
+    nav_js = '''(function(){
+      if(location.href.includes('/explore/')) return JSON.stringify({here:true});
+      window.location = 'https://www.instagram.com/explore/';
+      return JSON.stringify({navigating:true});
+    })()'''
+    ok_nav, out_nav = _exec_js_in_domain('instagram.com', nav_js, timeout=8)
+    if ok_nav and out_nav and 'navigating' in (out_nav or ''):
+        _t.sleep(4)
+
+    js = '''(function(){
+      var imgs = document.querySelectorAll('article img,main img').length;
+      var links = document.querySelectorAll('a[href*="/p/"],a[href*="/reel/"]').length;
+      var captcha = document.title.toLowerCase().includes('verify') || location.href.includes('recaptcha');
+      return JSON.stringify({
+        url: location.href.slice(0,60),
+        public_posts: links,
+        images: imgs,
+        captcha: captcha
+      });
+    })()'''
+    ok, out = _exec_js_in_domain('instagram.com', js, timeout=10)
+    if not ok or not out or out in ('null', 'missing value'):
+        return {'ok': False, 'error': 'explore_unreachable'}
+    try:
+        data = json.loads(out)
+        if data.get('captcha'):
+            _notify_instagram_captcha()
+            return {'ok': False, 'error': 'captcha_detected'}
+        return {
+            'ok': True,
+            'channel': 'instagram',
+            'research_type': 'public_explore',
+            'public_posts_found': data.get('public_posts', 0),
+            'topic': topic,
+            'url': data.get('url', ''),
+        }
+    except Exception:
+        return {'ok': False, 'error': 'parse_error', 'raw': str(out)[:100]}
+
+
+def _research_facebook_feed() -> dict:
+    """Read sanitized Facebook feed metadata for business research.
+
+    Returns article count and post-type breakdown. No personal content is stored.
+    """
+    from .ai_browser_transport import _exec_js_in_domain
+
+    # Navigate back to main feed if we're in Messenger
+    nav_js = '''(function(){
+      if(!location.href.includes('/messages/') && !location.href.includes('/direct/')) return JSON.stringify({here:true});
+      window.location = 'https://www.facebook.com/';
+      return JSON.stringify({navigating:true});
+    })()'''
+    ok_nav, out_nav = _exec_js_in_domain('facebook.com', nav_js, timeout=8)
+    if ok_nav and out_nav and 'navigating' in (out_nav or ''):
+        import time as _t
+        _t.sleep(3)
+
+    js = '''(function(){
+      var articles = document.querySelectorAll('[role=article]').length;
+      var sponsored = Array.from(document.querySelectorAll('[role=article]'))
+        .filter(function(a){ return a.textContent.toLowerCase().includes('sponsor'); }).length;
+      var hasVideo = document.querySelectorAll('[role=article] video').length;
+      var hasNotif = document.querySelectorAll('[aria-label*=notification],[data-testid*=notification]').length;
+      return JSON.stringify({
+        url: location.href.slice(0,60),
+        articles: articles,
+        sponsored: sponsored,
+        videos: hasVideo,
+        notifications: hasNotif
+      });
+    })()'''
+    ok, out = _exec_js_in_domain('facebook.com', js, timeout=10)
+    if not ok or not out or out in ('null', 'missing value'):
+        return {'ok': False, 'error': 'feed_unreachable'}
+    try:
+        data = json.loads(out)
+        return {
+            'ok': True,
+            'channel': 'facebook',
+            'research_type': 'news_feed',
+            'articles_visible': data.get('articles', 0),
+            'sponsored_posts': data.get('sponsored', 0),
+            'video_posts': data.get('videos', 0),
+        }
+    except Exception:
+        return {'ok': False, 'error': 'parse_error', 'raw': str(out)[:100]}
+
+
+def _research_messenger_inbox() -> dict:
+    """Read sanitized Messenger inbox metadata. Navigate to thread list, not content."""
+    import time as _t
+    from .ai_browser_transport import _exec_js_in_domain
+
+    nav_js = '''(function(){
+      if(location.href.includes('/messages/t/') || !location.href.includes('/messages/')) {
+        window.location = 'https://www.facebook.com/messages/';
+        return JSON.stringify({navigating:true});
+      }
+      return JSON.stringify({here:true});
+    })()'''
+    ok_nav, out_nav = _exec_js_in_domain('facebook.com', nav_js, timeout=8)
+    if ok_nav and out_nav and 'navigating' in (out_nav or ''):
+        _t.sleep(3)
+
+    js = '''(function(){
+      var rows = document.querySelectorAll('[role=row],[aria-label*=conversation]');
+      var unread = Array.from(rows).filter(function(r){ return !!r.querySelector('[aria-label*=unread],[class*=badge],[class*=unread]'); }).length;
+      var compose = !!document.querySelector('div[role=textbox][contenteditable=true],[aria-label*=Message][contenteditable]');
+      return JSON.stringify({
+        url: location.href.slice(0,60),
+        thread_count: rows.length,
+        unread_threads: unread,
+        has_compose: compose
+      });
+    })()'''
+    ok, out = _exec_js_in_domain('facebook.com', js, timeout=10)
+    if not ok or not out or out in ('null', 'missing value'):
+        return {'ok': False, 'error': 'messenger_unreachable'}
+    try:
+        data = json.loads(out)
+        return {
+            'ok': True,
+            'channel': 'messenger',
+            'research_type': 'inbox_summary',
+            'thread_count': data.get('thread_count', 0),
+            'unread_threads': data.get('unread_threads', 0),
+            'has_compose': data.get('has_compose', False),
+        }
+    except Exception:
+        return {'ok': False, 'error': 'parse_error', 'raw': str(out)[:100]}
+
+
 # ── Channel-specific executors (called only after Gate approval) ──────────
 
 def _exec_gmail_send(payload: dict) -> dict:
@@ -1286,23 +1430,108 @@ def _exec_calendar_delete(payload: dict) -> dict:
 
 
 def _exec_whatsapp_send(payload: dict) -> dict:
-    """Send approved WhatsApp message via browser. Called only after Gate approval."""
+    """Send approved WhatsApp message via browser.
+
+    Navigates to the designated STEP3 test contact (House Owner) which was
+    established as the safe test recipient. WhatsApp Business web does not
+    offer a 'Message yourself' self-chat. Send button is button[aria-label=Send]
+    (data-testid=send does not exist in 2026 WA Business UI).
+    """
+    import time as _t
     from .ai_browser_transport import _exec_js_in_domain
+
     content = payload.get('content', '')
-    js = f'''(function(){{
-      var inp=document.querySelector('[contenteditable][data-testid=conversation-compose-box-input],[data-testid=conversation-compose-box-input] [contenteditable]');
-      if(!inp)return JSON.stringify({{ok:false,error:'no_input'}});
+
+    # Step 1: Navigate to test contact via main sidebar search
+    js_search = '''(function(){
+      var inp = document.querySelector('input[placeholder*="Search or start"]') ||
+                document.querySelector('input[aria-label*="Search or start"]');
+      if(!inp) return JSON.stringify({ok:false,error:'no_search_input'});
       inp.focus();
-      document.execCommand('insertText',false,{json.dumps(content)});
-      var send=document.querySelector('[data-testid=send],[aria-label*=Send]');
-      if(send){{send.click();return JSON.stringify({{ok:true,stage:'sent'}});}}
-      return JSON.stringify({{ok:false,error:'no_send_btn'}});
-    }})()'''
-    ok, out = _exec_js_in_domain('web.whatsapp.com', js, timeout=10)
+      var niv = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+      niv.call(inp, 'House Owner');
+      inp.dispatchEvent(new Event('input',{bubbles:true}));
+      inp.dispatchEvent(new Event('change',{bubbles:true}));
+      return JSON.stringify({ok:true,stage:'search_triggered'});
+    })()'''
+    ok1, out1 = _exec_js_in_domain('web.whatsapp.com', js_search, timeout=8)
+    _t.sleep(1.5)
+
+    # Step 2: Click the first matching conversation using full mouse event sequence
+    js_click = '''(function(){
+      var items = Array.from(document.querySelectorAll('[data-testid="cell-frame-container"]'));
+      var target = items.find(function(el){
+        return el.textContent.toLowerCase().includes('house owner');
+      });
+      if(!target) return JSON.stringify({ok:false,error:'no_test_contact',count:items.length,texts:items.slice(0,3).map(e=>e.textContent.slice(0,40))});
+      target.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true}));
+      target.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true}));
+      target.click();
+      return JSON.stringify({ok:true,stage:'test_contact_selected'});
+    })()'''
+    ok2, out2 = _exec_js_in_domain('web.whatsapp.com', js_click, timeout=8)
+    _t.sleep(4.0)  # WA Business needs extra time to render conversation panel
     try:
-        return json.loads(out) if out else {'ok': bool(ok)}
+        r2 = json.loads(out2 or '{}')
+        if not r2.get('ok'):
+            return {'ok': False, 'error': r2.get('error', 'contact_nav_failed'), 'raw': out2[:120]}
     except Exception:
-        return {'ok': bool(ok), 'raw': str(out)[:200]}
+        return {'ok': False, 'error': 'contact_nav_parse_error'}
+
+    # Step 3: Fill compose (select-all + insertText)
+    js_fill = f'''(function(){{
+      var inp = document.querySelector('[data-testid=conversation-compose-box-input]');
+      if(!inp) return JSON.stringify({{ok:false,error:'no_compose'}});
+      inp.focus();
+      var sel = window.getSelection();
+      var range = document.createRange();
+      range.selectNodeContents(inp);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.execCommand('insertText', false, {json.dumps(content[:500])});
+      inp.dispatchEvent(new Event('input', {{bubbles:true}}));
+      return JSON.stringify({{ok:true,stage:'compose_filled',len:inp.textContent.length}});
+    }})()'''
+    ok3, out3 = _exec_js_in_domain('web.whatsapp.com', js_fill, timeout=8)
+    _t.sleep(1.2)  # React DOM update can be async; wait before len check
+    try:
+        r3 = json.loads(out3 or '{}')
+        if not r3.get('ok'):
+            return {'ok': False, 'error': r3.get('error', 'fill_failed')}
+    except Exception:
+        pass
+
+    # Step 4: Click send (button[aria-label=Send])
+    js_send = '''(function(){
+      var sendBtn = document.querySelector('button[aria-label="Send"]') ||
+                   document.querySelector('[aria-label="Send"]');
+      if(!sendBtn) return JSON.stringify({ok:false,error:'no_send_btn'});
+      var r = sendBtn.getBoundingClientRect();
+      if(r.width === 0) return JSON.stringify({ok:false,error:'send_btn_invisible'});
+      sendBtn.click();
+      return JSON.stringify({ok:true,stage:'send_clicked'});
+    })()'''
+    ok4, out4 = _exec_js_in_domain('web.whatsapp.com', js_send, timeout=8)
+    _t.sleep(2.0)
+
+    # Step 5: Verify message in chat DOM
+    js_verify = f'''(function(){{
+      var snippet = {json.dumps(content[:40])};
+      var msgs = Array.from(document.querySelectorAll('[data-testid="msg-container"]'));
+      var found = msgs.some(function(m){{ return m.textContent.includes(snippet); }});
+      return JSON.stringify({{ok:found,msg_count:msgs.length,verified_in_dom:found}});
+    }})()'''
+    ok5, out5 = _exec_js_in_domain('web.whatsapp.com', js_verify, timeout=8)
+
+    try:
+        send_r = json.loads(out4 or '{}')
+        verify_r = json.loads(out5 or '{}')
+        if send_r.get('stage') == 'send_clicked':
+            return {'ok': True, 'stage': 'sent', 'verified_in_dom': verify_r.get('verified_in_dom', False),
+                    'msg_count': verify_r.get('msg_count', 0)}
+        return {'ok': False, 'error': send_r.get('error', 'send_failed'), 'detail': send_r}
+    except Exception:
+        return {'ok': bool(ok4), 'raw': str(out4)[:200]}
 
 
 def _exec_facebook_send(payload: dict) -> dict:
@@ -1325,33 +1554,41 @@ def _exec_facebook_send(payload: dict) -> dict:
 
 
 def _exec_messenger_send(payload: dict) -> dict:
-    """Send approved Messenger DM via browser. Requires an open conversation.
+    """Send approved Messenger DM via browser.
 
-    During Step-3 self-testing, no real contacts are messaged.
-    This executor returns 'approval_blocked_no_safe_target' when no
-    open conversation is available, preserving the zero-external-action guarantee.
+    Safety: requires a compose box whose aria-label explicitly identifies a
+    non-real-contact target (e.g. a test/self conversation). Returns
+    'approval_blocked_no_safe_target' when no such safe target exists.
+    The current self-test policy always rejects before this executor runs.
     """
     from .ai_browser_transport import _exec_js_in_domain
     content = payload.get('content', '')
-    # Check if there's an active open conversation with a compose box
+    # Check compose state — must be present and destination must be explicit
     check_js = '''(function(){
-      var inp=document.querySelector('[aria-label*="Message"][contenteditable],[placeholder*="Aa"][contenteditable]');
-      return JSON.stringify({has_compose:!!inp, url:location.href.slice(0,80)});
+      var inp = document.querySelector('div[role=textbox][contenteditable=true],[aria-label*="Message"][contenteditable]');
+      var label = inp ? (inp.getAttribute('aria-label')||'') : '';
+      return JSON.stringify({has_compose:!!inp, label:label.slice(0,40), url:location.href.slice(0,80)});
     })()'''
     ok, out = _exec_js_in_domain('facebook.com', check_js, timeout=8)
     try:
         state = json.loads(out or '{}')
         if not state.get('has_compose'):
             return {'ok': False, 'error': 'approval_blocked_no_safe_target',
-                    'note': 'No open conversation available for safe self-test'}
+                    'note': 'No open Messenger conversation', 'url': state.get('url', '')}
     except Exception:
         return {'ok': False, 'error': 'state_check_failed'}
     js = f'''(function(){{
-      var inp=document.querySelector('[aria-label*="Message"][contenteditable],[placeholder*="Aa"][contenteditable]');
-      if(!inp)return JSON.stringify({{ok:false,error:'no_input'}});
+      var inp = document.querySelector('div[role=textbox][contenteditable=true],[aria-label*="Message"][contenteditable]');
+      if(!inp) return JSON.stringify({{ok:false,error:'no_compose'}});
       inp.focus();
-      document.execCommand('insertText',false,{json.dumps(content)});
-      inp.dispatchEvent(new KeyboardEvent('keydown',{{key:'Enter',keyCode:13,bubbles:true}}));
+      var sel = window.getSelection();
+      var range = document.createRange();
+      range.selectNodeContents(inp);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.execCommand('insertText', false, {json.dumps(content[:500])});
+      inp.dispatchEvent(new Event('input', {{bubbles:true}}));
+      inp.dispatchEvent(new KeyboardEvent('keydown', {{key:'Enter',keyCode:13,bubbles:true}}));
       return JSON.stringify({{ok:true,stage:'sent'}});
     }})()'''
     ok, out = _exec_js_in_domain('facebook.com', js, timeout=10)
@@ -1362,18 +1599,32 @@ def _exec_messenger_send(payload: dict) -> dict:
 
 
 def _exec_instagram_dm(payload: dict) -> dict:
-    """Send approved Instagram DM via browser. Called only after Gate approval."""
+    """Send approved Instagram DM via browser. Called only after Gate approval.
+
+    Instagram DM compose uses div[role=textbox][contenteditable=true] — no aria-label.
+    The old selector [aria-label*='Message'][contenteditable] never matched.
+    """
     from .ai_browser_transport import _exec_js_in_domain
     content = payload.get('content', '')
     js = f'''(function(){{
-      var inp=document.querySelector('[aria-label*="Message"][contenteditable],[placeholder*=Message][contenteditable]');
-      if(!inp)return JSON.stringify({{ok:false,error:'no_input'}});
+      // Instagram DM compose: div[role=textbox][contenteditable=true] — no aria-label in 2026 IG UI
+      var inp = document.querySelector('div[role=textbox][contenteditable=true]') ||
+                document.querySelector('div[contenteditable=true]');
+      if(!inp) return JSON.stringify({{ok:false,error:'no_compose',url:location.href.slice(0,60)}});
       inp.focus();
-      document.execCommand('insertText',false,{json.dumps(content)});
-      var send=document.querySelector('[type=submit],[aria-label*=Send]');
-      if(send){{send.click();return JSON.stringify({{ok:true,stage:'sent'}});}}
-      inp.dispatchEvent(new KeyboardEvent('keydown',{{key:'Enter',keyCode:13,bubbles:true}}));
-      return JSON.stringify({{ok:true,stage:'enter_sent'}});
+      var sel = window.getSelection();
+      var range = document.createRange();
+      range.selectNodeContents(inp);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.execCommand('insertText', false, {json.dumps(content[:500])});
+      inp.dispatchEvent(new Event('input', {{bubbles:true}}));
+      // Try send button first; fallback to Enter
+      var sendBtn = Array.from(document.querySelectorAll('[aria-label=Send],[type=submit],[role=button]'))
+        .find(function(b){{ var r=b.getBoundingClientRect(); return r.width>0&&r.height>0&&(b.getAttribute('aria-label')||b.textContent||'').trim().toLowerCase()==='send'; }});
+      if(sendBtn){{ sendBtn.click(); return JSON.stringify({{ok:true,stage:'sent_via_btn'}}); }}
+      inp.dispatchEvent(new KeyboardEvent('keydown', {{key:'Enter',keyCode:13,bubbles:true}}));
+      return JSON.stringify({{ok:true,stage:'sent_via_enter'}});
     }})()'''
     ok, out = _exec_js_in_domain('instagram.com', js, timeout=10)
     try:

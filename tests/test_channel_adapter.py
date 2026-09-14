@@ -842,15 +842,23 @@ class TestExecGmailSend(unittest.TestCase):
 class TestExecWhatsappSend(unittest.TestCase):
     @patch(_JS_PATCH)
     def test_returns_dict(self, mock_js):
-        mock_js.return_value = (True, json.dumps({'ok': True, 'stage': 'sent'}))
+        # 5 calls: new_chat_click, self_chat_select, fill_compose, send_click, verify
+        mock_js.side_effect = [
+            (True, json.dumps({'ok': True, 'stage': 'new_chat_opened'})),
+            (True, json.dumps({'ok': True, 'stage': 'self_chat_selected'})),
+            (True, json.dumps({'ok': True, 'stage': 'compose_filled', 'len': 5})),
+            (True, json.dumps({'ok': True, 'stage': 'send_clicked'})),
+            (True, json.dumps({'ok': True, 'msg_count': 1, 'verified_in_dom': True})),
+        ]
         result = _exec_whatsapp_send({'content': 'Hello'})
         self.assertIsInstance(result, dict)
+        self.assertTrue(result.get('ok'))
 
     @patch(_JS_PATCH)
     def test_invalid_json_returns_fallback(self, mock_js):
+        # new_chat fails immediately — returns error dict without raising
         mock_js.return_value = (True, 'not json')
         result = _exec_whatsapp_send({'content': 'Hi'})
-        # Should not raise; returns dict with 'raw' or 'ok'
         self.assertIsInstance(result, dict)
 
 
