@@ -82,7 +82,8 @@ class TestControlCenterServer(unittest.TestCase):
         self.assertIn('connections', data)
         conn = data['connections']
         expected_keys = {'codex', 'claude', 'gemini', 'chatgpt_web',
-                         'browser', 'n8n', 'telegram', 'github', 'cpc'}
+                         'browser', 'n8n', 'telegram', 'github', 'cpc',
+                         'ch_gmail', 'ch_calendar', 'ch_whatsapp', 'ch_facebook', 'ch_instagram'}
         self.assertEqual(set(conn.keys()), expected_keys)
 
     def test_04_tasks_returns_list(self):
@@ -250,7 +251,8 @@ class TestConnectionStatusValues(unittest.TestCase):
         from zamal_core.control_center import get_connection_status
         statuses = get_connection_status()
         expected = {'codex', 'claude', 'gemini', 'chatgpt_web',
-                    'browser', 'n8n', 'telegram', 'github', 'cpc'}
+                    'browser', 'n8n', 'telegram', 'github', 'cpc',
+                    'ch_gmail', 'ch_calendar', 'ch_whatsapp', 'ch_facebook', 'ch_instagram'}
         self.assertEqual(set(statuses.keys()), expected)
 
 

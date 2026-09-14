@@ -204,6 +204,24 @@ def _check_ai_browser() -> str:
     return _check_browser()
 
 
+def _check_channel(channel: str) -> str:
+    """Check a channel adapter read. Returns ok/partial/unconfigured."""
+    import sys
+    if sys.platform != 'darwin':
+        return 'unconfigured'
+    try:
+        from .channel_adapter import get_channel_adapter
+        ca = get_channel_adapter()
+        result = ca.read(channel, limit=1)
+        if result.error and 'not_darwin' in result.error:
+            return 'unconfigured'
+        if result.count > 0:
+            return 'ok'
+        return 'partial'
+    except Exception:
+        return 'unconfigured'
+
+
 def get_connection_status():
     """Return dict of integration statuses. All values must be in _VALID_STATUSES."""
     statuses = {
@@ -216,6 +234,11 @@ def get_connection_status():
         'telegram': _check_telegram(),
         'github': _check_github(),
         'cpc': _check_cpc(),
+        'ch_gmail': _check_channel('gmail'),
+        'ch_calendar': _check_channel('calendar'),
+        'ch_whatsapp': _check_channel('whatsapp'),
+        'ch_facebook': _check_channel('facebook'),
+        'ch_instagram': _check_channel('instagram'),
     }
     # Safety assertion — all values must be valid
     for k, v in statuses.items():
@@ -670,12 +693,34 @@ function statusLabel(v) {
   }[v] || v;
 }
 
+var CHANNEL_LABELS = {
+  'ch_gmail': 'Gmail', 'ch_calendar': 'Google Calendar',
+  'ch_whatsapp': 'WhatsApp Web', 'ch_facebook': 'Facebook/Messenger',
+  'ch_instagram': 'Instagram DM',
+};
+
+function connLabel(k) {
+  return CHANNEL_LABELS[k] || k;
+}
+
 function refreshStatus() {
   apiFetch('/api/status').then(function(d) {
     var conn = d.connections || {};
-    var rows = Object.keys(conn).map(function(k) {
-      var v = conn[k];
-      return '<tr><td>' + k + '</td><td><span class="' + dotClass(v) + '"></span>' + statusLabel(v) + '</td></tr>';
+    var keys = Object.keys(conn);
+    var main = keys.filter(function(k){return !k.startsWith('ch_');});
+    var ch = keys.filter(function(k){return k.startsWith('ch_');});
+    var rows = '';
+    if (ch.length) {
+      rows += '<tr><td colspan="2" style="font-size:10px;color:#a0aec0;padding-top:6px">CHANNELS</td></tr>';
+      rows += ch.map(function(k){
+        var v=conn[k];
+        return '<tr><td>'+connLabel(k)+'</td><td><span class="'+dotClass(v)+'"></span>'+statusLabel(v)+'</td></tr>';
+      }).join('');
+      rows += '<tr><td colspan="2" style="font-size:10px;color:#a0aec0;padding-top:6px">INTEGRATIONS</td></tr>';
+    }
+    rows += main.map(function(k){
+      var v=conn[k];
+      return '<tr><td>'+connLabel(k)+'</td><td><span class="'+dotClass(v)+'"></span>'+statusLabel(v)+'</td></tr>';
     }).join('');
     document.getElementById('status-body').innerHTML = rows || '<tr><td colspan="2">No data</td></tr>';
   }).catch(function() {});
