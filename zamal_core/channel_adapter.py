@@ -16,6 +16,10 @@ from typing import Optional
 
 from .privacy_filter import PRIVACY_FILTER
 from .integration_security import SECRET_TEXT
+from .private_read_auth import (
+    PRIVATE_READ_REGISTRY, PRIVATE_CHANNELS, PrivateReadDenied,
+    require_read_auth, metadata_only_result, record_privacy_incident,
+)
 
 _IS_DARWIN = __import__('sys').platform == 'darwin'
 
@@ -533,8 +537,20 @@ def _get_executor(channel: str, action: str):
     return executors[key]
 
 
-def _read_telegram(*, limit=10, query='') -> list:
-    """Read recent Telegram messages via bot API (update log)."""
+def _read_telegram(*, limit=10, query='', _auth=None) -> list:
+    """Read recent Telegram messages via bot API (update log).
+
+    Requires a PrivateReadAuth for channel='telegram'. Without authorization,
+    returns a single metadata-only item (authenticated, count) with no content.
+    """
+    try:
+        auth = _auth or require_read_auth('telegram', query or '*')
+    except PrivateReadDenied:
+        return [ChannelItem(
+            channel='telegram', item_id='meta', sender='[SYSTEM]', subject='',
+            preview='[PRIVATE_READ_DENIED: no authorization]', timestamp=time.time(),
+            metadata=metadata_only_result('telegram'),
+        )]
     try:
         from .control_center import _load_auth_env
         _load_auth_env()
@@ -556,13 +572,27 @@ def _read_telegram(*, limit=10, query='') -> list:
                 preview=_mask_pii(text[:500]),
                 timestamp=float(msg.get('date', time.time())),
             ))
+        if auth:
+            auth.consume()
         return items
     except Exception:
         return []
 
 
-def _read_gmail(*, limit=10, query='') -> list:
-    """Read Gmail inbox via logged-in Chrome session. Supports keyword query filtering."""
+def _read_gmail(*, limit=10, query='', _auth=None) -> list:
+    """Read Gmail inbox via logged-in Chrome session. Supports keyword query filtering.
+
+    Requires a PrivateReadAuth for channel='gmail'. Without authorization,
+    returns a metadata-only sentinel item (no subject, sender, or body content).
+    """
+    try:
+        auth = _auth or require_read_auth('gmail', query or '*')
+    except PrivateReadDenied:
+        return [ChannelItem(
+            channel='gmail', item_id='meta', sender='[SYSTEM]', subject='',
+            preview='[PRIVATE_READ_DENIED: no authorization]', timestamp=time.time(),
+            metadata=metadata_only_result('gmail'),
+        )]
     from .ai_browser_transport import _exec_js_in_domain
     # If there's a query, navigate to search results first
     if query:
@@ -619,6 +649,8 @@ def _read_gmail(*, limit=10, query='') -> list:
                 timestamp=time.time(),
                 metadata={'time': d.get('time', ''), 'unread': d.get('unread', False)},
             ))
+        if auth:
+            auth.consume()
         return items
     except Exception:
         return []
@@ -674,8 +706,20 @@ def _read_calendar(*, limit=10, query='') -> list:
         return []
 
 
-def _read_whatsapp(*, limit=10, query='') -> list:
-    """Read WhatsApp Web conversations via logged-in Chrome session. Supports query search."""
+def _read_whatsapp(*, limit=10, query='', _auth=None) -> list:
+    """Read WhatsApp Web conversations via logged-in Chrome session.
+
+    Requires a PrivateReadAuth for channel='whatsapp'. Without authorization,
+    returns metadata-only (tab_found, unread_count) — no contact names or previews.
+    """
+    try:
+        auth = _auth or require_read_auth('whatsapp', query or '*')
+    except PrivateReadDenied:
+        return [ChannelItem(
+            channel='whatsapp', item_id='meta', sender='[SYSTEM]', subject='',
+            preview='[PRIVATE_READ_DENIED: no authorization]', timestamp=time.time(),
+            metadata=metadata_only_result('whatsapp'),
+        )]
     from .ai_browser_transport import _exec_js_in_domain
     import time as _t
 
@@ -714,7 +758,7 @@ def _read_whatsapp(*, limit=10, query='') -> list:
         return []
     try:
         data = json.loads(out)
-        return [ChannelItem(
+        items = [ChannelItem(
             channel='whatsapp',
             item_id=d.get('id', str(i)),
             sender='[CONTACT]',
@@ -722,6 +766,9 @@ def _read_whatsapp(*, limit=10, query='') -> list:
             preview=_mask_pii(d.get('preview', '')[:200]),
             timestamp=time.time(),
         ) for i, d in enumerate(data)]
+        if auth:
+            auth.consume()
+        return items
     except Exception:
         return []
 
@@ -776,12 +823,20 @@ def _read_facebook(*, limit=10, query='') -> list:
         return []
 
 
-def _read_messenger(*, limit=10, query='') -> list:
+def _read_messenger(*, limit=10, query='', _auth=None) -> list:
     """Read Facebook Messenger DM threads — separate from Facebook Pages/Feed.
 
-    Navigates to facebook.com/messages/t/ (DM thread list) specifically.
-    Classified as a distinct channel from 'facebook' (which covers Pages/Feed).
+    Requires a PrivateReadAuth for channel='messenger'. Without authorization,
+    returns metadata-only (thread count, unread flag) — no names or previews.
     """
+    try:
+        auth = _auth or require_read_auth('messenger', query or '*')
+    except PrivateReadDenied:
+        return [ChannelItem(
+            channel='messenger', item_id='meta', sender='[SYSTEM]', subject='',
+            preview='[PRIVATE_READ_DENIED: no authorization]', timestamp=time.time(),
+            metadata=metadata_only_result('messenger'),
+        )]
     from .ai_browser_transport import _exec_js_in_domain
     import time as _time
 
@@ -824,7 +879,7 @@ def _read_messenger(*, limit=10, query='') -> list:
         else:
             count = data.get('count', 0)
             threads = data.get('threads', [])
-        return [ChannelItem(
+        items = [ChannelItem(
             channel='messenger',
             item_id=str(i),
             sender='[CONTACT]',
@@ -833,16 +888,28 @@ def _read_messenger(*, limit=10, query='') -> list:
             timestamp=time.time(),
             metadata={'has_unread': t.get('hasUnread', False) if i < len(threads) else False},
         ) for i, t in enumerate(threads[:min(count, limit)])]
+        if auth:
+            auth.consume()
+        return items
     except Exception:
         return []
 
 
-def _read_instagram(*, limit=10, query='') -> list:
+def _read_instagram(*, limit=10, query='', _auth=None) -> list:
     """Read Instagram DM conversations via logged-in Chrome session.
 
-    Navigates to DM inbox first. Returns authenticated-empty result if inbox is empty.
-    Returns [] and fires Telegram notice if CAPTCHA is detected.
+    Requires a PrivateReadAuth for channel='instagram'. Without authorization,
+    returns metadata-only (tab found, login state) — no contact names or DM previews.
+    Navigates to DM inbox first. Fires Telegram notice if CAPTCHA is detected.
     """
+    try:
+        auth = _auth or require_read_auth('instagram', query or '*')
+    except PrivateReadDenied:
+        return [ChannelItem(
+            channel='instagram', item_id='meta', sender='[SYSTEM]', subject='',
+            preview='[PRIVATE_READ_DENIED: no authorization]', timestamp=time.time(),
+            metadata=metadata_only_result('instagram'),
+        )]
     from .ai_browser_transport import _exec_js_in_domain
     import time as _time
 
@@ -856,13 +923,15 @@ def _read_instagram(*, limit=10, query='') -> list:
     if ok_nav and out_nav and 'navigating' in (out_nav or ''):
         _time.sleep(4)
 
-    # Detect CAPTCHA
+    # Detect CAPTCHA — narrow selectors only, no broad text extraction
     state_js = '''(function(){
+      var url=location.href;
+      var title=document.title.toLowerCase();
       return JSON.stringify({
-        url:location.href,
-        captcha:location.href.includes("recaptcha")||document.title.toLowerCase().includes("verify"),
+        url:url,
+        captcha:url.includes("recaptcha")||title.includes("verify"),
         hasLoginForm:!!document.querySelector('input[name=username]'),
-        emptyInbox:document.body.innerText.includes("Your messages")&&document.body.innerText.includes("Send a message")
+        emptyInboxSignal:!!document.querySelector('[aria-label="New message"],[aria-label="Direct"]')
       });
     })()'''
     ok, out = _exec_js_in_domain('instagram.com', state_js, timeout=8)
@@ -872,8 +941,10 @@ def _read_instagram(*, limit=10, query='') -> list:
             if state.get('captcha') or state.get('hasLoginForm'):
                 _notify_instagram_captcha()
                 return []
-            if state.get('emptyInbox'):
-                # Authenticated, inbox is empty — return sentinel item
+            if state.get('emptyInboxSignal') and not state.get('captcha') and not state.get('hasLoginForm'):
+                # Authenticated, inbox appears empty — return sentinel item
+                if auth:
+                    auth.consume()
                 return [ChannelItem(
                     channel='instagram',
                     item_id='empty_inbox',
@@ -905,7 +976,7 @@ def _read_instagram(*, limit=10, query='') -> list:
             count = len(data)
         else:
             count = data.get('count', 0)
-        return [ChannelItem(
+        items = [ChannelItem(
             channel='instagram',
             item_id=str(i),
             sender='[CONTACT]',
@@ -913,11 +984,25 @@ def _read_instagram(*, limit=10, query='') -> list:
             preview='[CONVERSATION]',
             timestamp=time.time(),
         ) for i in range(min(count, limit))]
+        if auth:
+            auth.consume()
+        return items
     except Exception:
         return []
 
 
 _instagram_captcha_notified = False
+
+
+def _check_telegram_configured() -> bool:
+    """Return True if Telegram bot credentials are present (no content read)."""
+    try:
+        from .control_center import _load_auth_env
+        _load_auth_env()
+        from .telegram_bot import TelegramConfig
+        return TelegramConfig().configured
+    except Exception:
+        return False
 
 
 def _notify_instagram_captcha():
@@ -1432,8 +1517,8 @@ def _exec_calendar_delete(payload: dict) -> dict:
 def _exec_whatsapp_send(payload: dict) -> dict:
     """Send approved WhatsApp message via browser.
 
-    Navigates to the designated STEP3 test contact (House Owner) which was
-    established as the safe test recipient. WhatsApp Business web does not
+    Navigates to the designated test contact (Jamal BD Number) by searching
+    the sidebar. WhatsApp Business web does not
     offer a 'Message yourself' self-chat. Send button is button[aria-label=Send]
     (data-testid=send does not exist in 2026 WA Business UI).
     """
@@ -1449,7 +1534,7 @@ def _exec_whatsapp_send(payload: dict) -> dict:
       if(!inp) return JSON.stringify({ok:false,error:'no_search_input'});
       inp.focus();
       var niv = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
-      niv.call(inp, 'House Owner');
+      niv.call(inp, 'Jamal BD Number');
       inp.dispatchEvent(new Event('input',{bubbles:true}));
       inp.dispatchEvent(new Event('change',{bubbles:true}));
       return JSON.stringify({ok:true,stage:'search_triggered'});
@@ -1461,7 +1546,7 @@ def _exec_whatsapp_send(payload: dict) -> dict:
     js_click = '''(function(){
       var items = Array.from(document.querySelectorAll('[data-testid="cell-frame-container"]'));
       var target = items.find(function(el){
-        return el.textContent.toLowerCase().includes('house owner');
+        return el.textContent.toLowerCase().includes('jamal bd');
       });
       if(!target) return JSON.stringify({ok:false,error:'no_test_contact',count:items.length,texts:items.slice(0,3).map(e=>e.textContent.slice(0,40))});
       target.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true}));

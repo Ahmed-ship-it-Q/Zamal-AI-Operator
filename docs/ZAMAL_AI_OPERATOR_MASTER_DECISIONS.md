@@ -180,3 +180,71 @@ The AI Grocery Decision Platform (`AI-GROCERY-DECISION-PLATFORM`) is registered 
 - End-to-end encrypted Telegram command channel
 - Full external integration suite: Gmail, Calendar, Drive, Zoho CRM, GitHub
 - Production hardening: rate limiting, credential rotation, backup automation
+
+---
+
+## 9. Private-Message Read Authorization Policy
+
+**Decision date:** 2026-09-14  
+**Authority:** USER MASTER EXECUTION FORM — PRIVATE MESSAGE ACCESS LOCK  
+**Implemented in:** `zamal_core/private_read_auth.py`, `zamal_core/channel_adapter.py`, `zamal_core/ai_browser_transport.py`
+
+### Default-Deny Rule
+
+Zamal must never read private message bodies, previews, inbox rows, notifications, email content or AI chat history unless the caller holds a valid `PrivateReadAuth` for the exact channel and target.
+
+**Private channels:** `gmail`, `telegram`, `whatsapp`, `messenger`, `instagram`
+
+### Authorization Requirements
+
+A valid `PrivateReadAuth` must contain:
+1. `task_id` — binds to an active task
+2. `channel` — exact channel name
+3. `target` — exact conversation/contact or `'*'` for inbox count only
+4. `purpose` — human-readable reason
+5. `scope` — permitted range (e.g. `'last_10_messages'`)
+6. `expires_at` — TTL (default 120 s); auto-consumed on use
+7. `authorized_by` — reference to originating operator command
+
+### Authorization Lifecycle
+
+- Authorization is single-use: `auth.consume()` is called after the read completes.
+- Authorization expires when the TTL elapses, even if unused.
+- `PRIVATE_READ_REGISTRY.revoke_task(task_id)` revokes all auths when a task completes.
+- An auth for `channel=gmail, target=STEP3A_SELF_TEST` cannot be reused for `channel=gmail, target=inbox`.
+
+### Default Response Without Auth
+
+Without authorization, `_read_*` functions for private channels return a single metadata-only `ChannelItem`:
+```
+preview='[PRIVATE_READ_DENIED: no authorization]'
+metadata={'authenticated': True, 'tab_found': True, 'content_access': 'DENIED', ...}
+```
+No names, subjects, senders, or content are returned.
+
+### Broad Extraction Prohibition
+
+The following patterns are blocked in all JS injected into private-domain browser tabs (`_exec_js_in_domain`), regardless of authorization:
+- `document.body.innerText` / `textContent`
+- `document.body.innerHTML` / `outerHTML`
+- `document.documentElement.*`
+- `.querySelectorAll("*")`
+- `getAccessibilityTree` / `getComputedAccessibilityTree`
+
+Violation → `(False, 'BROAD_EXTRACTION_BLOCKED:<pattern>')` returned before AppleScript runs.
+
+### CC Channel Health Check
+
+`_check_channel()` in `control_center.py` uses a narrow metadata-only browser probe (no content, no names). It does NOT require a `PrivateReadAuth`. Content reads remain gated.
+
+### Incident Handling
+
+Accidental private-content exposure triggers `record_privacy_incident()`:
+1. Stops the operation immediately
+2. Logs `PRIVACY_BLOCKED` (no raw content in log)
+3. Sends sanitized Telegram warning (async, non-blocking)
+4. Requires a new scoped instruction before continuing
+
+### Separation of Public vs Private
+
+`_research_facebook_feed()`, `_research_instagram_public()` and public-web functions do not require `PrivateReadAuth` — they target public pages only. They cannot unlock private DMs, inboxes, or email.

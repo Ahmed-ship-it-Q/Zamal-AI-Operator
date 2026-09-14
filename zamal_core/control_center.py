@@ -205,19 +205,52 @@ def _check_ai_browser() -> str:
 
 
 def _check_channel(channel: str) -> str:
-    """Check a channel adapter read. Returns ok/partial/unconfigured."""
+    """Check channel tab/browser availability. Returns ok/partial/unconfigured.
+
+    For private channels (gmail, whatsapp, messenger, instagram, telegram) this
+    uses a metadata-only browser probe — it does NOT read message content and does
+    NOT require a PrivateReadAuth. Content reads remain gated by the auth system.
+    """
     import sys
     if sys.platform != 'darwin':
         return 'unconfigured'
     try:
-        from .channel_adapter import get_channel_adapter
-        ca = get_channel_adapter()
-        result = ca.read(channel, limit=1)
-        if result.error and 'not_darwin' in result.error:
+        from .private_read_auth import PRIVATE_CHANNELS
+        from .ai_browser_transport import _exec_js_in_domain
+
+        _CHANNEL_DOMAINS = {
+            'gmail': 'mail.google.com',
+            'calendar': 'calendar.google.com',
+            'whatsapp': 'web.whatsapp.com',
+            'facebook': 'facebook.com',
+            'messenger': 'facebook.com',
+            'instagram': 'instagram.com',
+            'telegram': None,  # API-based, checked separately
+        }
+
+        if channel == 'telegram':
+            # Telegram uses bot API — just check credentials present
+            from .channel_adapter import _check_telegram_configured
+            return 'configured' if _check_telegram_configured() else 'unconfigured'
+
+        domain = _CHANNEL_DOMAINS.get(channel)
+        if domain is None:
             return 'unconfigured'
-        if result.count > 0:
-            return 'ok'
-        return 'partial'
+
+        # Metadata-only probe: checks tab exists and session is active (no content)
+        ok, out = _exec_js_in_domain(
+            domain,
+            'JSON.stringify({tab_found:true,logged_in:!document.querySelector("input[type=password]")})',
+            timeout=4,
+        )
+        if not ok or not out or out in ('null', 'missing value', 'NO_TAB'):
+            return 'unconfigured'
+        import json as _json
+        try:
+            state = _json.loads(out)
+            return 'ok' if state.get('logged_in') else 'partial'
+        except Exception:
+            return 'partial'
     except Exception:
         return 'unconfigured'
 

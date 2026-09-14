@@ -512,6 +512,13 @@ _JS_PATCH = 'zamal_core.ai_browser_transport._exec_js_in_domain'
 
 
 class TestReadGmail(unittest.TestCase):
+    def _make_auth(self):
+        from zamal_core.private_read_auth import PRIVATE_READ_REGISTRY
+        return PRIVATE_READ_REGISTRY.authorize(
+            task_id='test-gmail', channel='gmail', target='*',
+            purpose='unit test', scope='inbox_list', ttl_seconds=30,
+        )
+
     def _make_js_output(self):
         data = [
             {'id': 'thread1', 'sender': 'alice@example.com',
@@ -524,7 +531,7 @@ class TestReadGmail(unittest.TestCase):
     @patch(_JS_PATCH)
     def test_parses_chrome_js_output_correctly(self, mock_js):
         mock_js.return_value = (True, self._make_js_output())
-        items = _read_gmail(limit=10)
+        items = _read_gmail(limit=10, _auth=self._make_auth())
         self.assertEqual(len(items), 2)
         self.assertEqual(items[0].channel, 'gmail')
         # sender is always [CONTACT] — email addresses are PII-masked
@@ -538,51 +545,58 @@ class TestReadGmail(unittest.TestCase):
     def test_sender_email_not_exposed(self, mock_js):
         """Email addresses in sender field must never appear in returned items."""
         mock_js.return_value = (True, self._make_js_output())
-        items = _read_gmail(limit=10)
+        items = _read_gmail(limit=10, _auth=self._make_auth())
         for item in items:
             self.assertNotIn('@', item.sender, 'Real email address found in sender field')
 
     @patch(_JS_PATCH)
     def test_returns_empty_on_js_failure(self, mock_js):
         mock_js.return_value = (False, '')
-        items = _read_gmail()
+        items = _read_gmail(_auth=self._make_auth())
         self.assertEqual(items, [])
 
     @patch(_JS_PATCH)
     def test_returns_empty_on_null_output(self, mock_js):
         mock_js.return_value = (True, 'null')
-        items = _read_gmail()
+        items = _read_gmail(_auth=self._make_auth())
         self.assertEqual(items, [])
 
     @patch(_JS_PATCH)
     def test_returns_empty_on_missing_value(self, mock_js):
         mock_js.return_value = (True, 'missing value')
-        items = _read_gmail()
+        items = _read_gmail(_auth=self._make_auth())
         self.assertEqual(items, [])
 
     @patch(_JS_PATCH)
     def test_returns_empty_on_invalid_json(self, mock_js):
         mock_js.return_value = (True, 'not-valid-json{{{')
-        items = _read_gmail()
+        items = _read_gmail(_auth=self._make_auth())
         self.assertEqual(items, [])
 
     @patch(_JS_PATCH)
     def test_all_items_have_gmail_channel(self, mock_js):
         mock_js.return_value = (True, self._make_js_output())
-        items = _read_gmail()
+        items = _read_gmail(_auth=self._make_auth())
         for item in items:
             self.assertEqual(item.channel, 'gmail')
 
     @patch(_JS_PATCH)
     def test_empty_array_returns_empty_list(self, mock_js):
         mock_js.return_value = (True, '[]')
-        items = _read_gmail()
+        items = _read_gmail(_auth=self._make_auth())
         self.assertEqual(items, [])
 
 
 # ── _read_whatsapp() ──────────────────────────────────────────────────────
 
 class TestReadWhatsapp(unittest.TestCase):
+    def _make_auth(self):
+        from zamal_core.private_read_auth import PRIVATE_READ_REGISTRY
+        return PRIVATE_READ_REGISTRY.authorize(
+            task_id='test-wa', channel='whatsapp', target='*',
+            purpose='unit test', scope='inbox_list', ttl_seconds=30,
+        )
+
     def _make_js_output(self):
         data = [
             {'id': '0', 'name': 'Alice', 'preview': 'See you tomorrow'},
@@ -593,7 +607,7 @@ class TestReadWhatsapp(unittest.TestCase):
     @patch(_JS_PATCH)
     def test_parses_chrome_js_output_correctly(self, mock_js):
         mock_js.return_value = (True, self._make_js_output())
-        items = _read_whatsapp(limit=10)
+        items = _read_whatsapp(limit=10, _auth=self._make_auth())
         self.assertEqual(len(items), 2)
         self.assertEqual(items[0].channel, 'whatsapp')
         # Contact names are always masked as [CONTACT] — PII protection
@@ -603,40 +617,40 @@ class TestReadWhatsapp(unittest.TestCase):
     @patch(_JS_PATCH)
     def test_returns_empty_on_js_failure(self, mock_js):
         mock_js.return_value = (False, '')
-        items = _read_whatsapp()
+        items = _read_whatsapp(_auth=self._make_auth())
         self.assertEqual(items, [])
 
     @patch(_JS_PATCH)
     def test_returns_empty_on_empty_array(self, mock_js):
         mock_js.return_value = (True, '[]')
-        items = _read_whatsapp()
+        items = _read_whatsapp(_auth=self._make_auth())
         self.assertEqual(items, [])
 
     @patch(_JS_PATCH)
     def test_all_items_have_whatsapp_channel(self, mock_js):
         mock_js.return_value = (True, self._make_js_output())
-        items = _read_whatsapp()
+        items = _read_whatsapp(_auth=self._make_auth())
         for item in items:
             self.assertEqual(item.channel, 'whatsapp')
 
     @patch(_JS_PATCH)
     def test_returns_empty_on_missing_value(self, mock_js):
         mock_js.return_value = (True, 'missing value')
-        items = _read_whatsapp()
+        items = _read_whatsapp(_auth=self._make_auth())
         self.assertEqual(items, [])
 
     @patch(_JS_PATCH)
     def test_sender_is_always_contact_token(self, mock_js):
         """Contact names must never appear in sender — always [CONTACT]."""
         mock_js.return_value = (True, json.dumps([{'id': '0', 'name': 'Charlie', 'preview': 'hi'}]))
-        items = _read_whatsapp()
+        items = _read_whatsapp(_auth=self._make_auth())
         self.assertEqual(items[0].sender, '[CONTACT]')
 
     @patch(_JS_PATCH)
     def test_phone_in_preview_masked(self, mock_js):
         """Phone numbers in preview content must be masked."""
         mock_js.return_value = (True, json.dumps([{'id': '0', 'preview': 'Call me at +1 555-123-4567'}]))
-        items = _read_whatsapp()
+        items = _read_whatsapp(_auth=self._make_auth())
         self.assertNotIn('+1 555-123-4567', items[0].preview)
         self.assertIn('[PHONE_REDACTED]', items[0].preview)
 
@@ -690,12 +704,19 @@ class TestReadFacebook(unittest.TestCase):
 # ── _read_instagram() ────────────────────────────────────────────────────
 
 class TestReadInstagram(unittest.TestCase):
+    def _make_auth(self):
+        from zamal_core.private_read_auth import PRIVATE_READ_REGISTRY
+        return PRIVATE_READ_REGISTRY.authorize(
+            task_id='test-ig', channel='instagram', target='*',
+            purpose='unit test', scope='inbox_list', ttl_seconds=30,
+        )
+
     @patch(_JS_PATCH)
     def test_parses_dms_count(self, mock_js):
         """Array data returns correct count with sanitized previews."""
         data = [{'id': '0'}, {'id': '1'}]
         mock_js.return_value = (True, json.dumps(data))
-        items = _read_instagram()
+        items = _read_instagram(_auth=self._make_auth())
         self.assertEqual(len(items), 2)
         self.assertEqual(items[0].channel, 'instagram')
         # Real conversation content is never exposed — always sanitized label
@@ -705,12 +726,19 @@ class TestReadInstagram(unittest.TestCase):
     @patch(_JS_PATCH)
     def test_returns_empty_on_missing_value(self, mock_js):
         mock_js.return_value = (True, 'missing value')
-        self.assertEqual(_read_instagram(), [])
+        self.assertEqual(_read_instagram(_auth=self._make_auth()), [])
 
 
 # ── _read_telegram() ─────────────────────────────────────────────────────
 
 class TestReadTelegram(unittest.TestCase):
+    def _make_auth(self):
+        from zamal_core.private_read_auth import PRIVATE_READ_REGISTRY
+        return PRIVATE_READ_REGISTRY.authorize(
+            task_id='test-tg', channel='telegram', target='*',
+            purpose='unit test', scope='inbox_list', ttl_seconds=30,
+        )
+
     def test_returns_empty_when_telegram_not_configured(self):
         """When TelegramConfig reports not configured, reader returns []."""
         mock_tc = MagicMock()
@@ -723,7 +751,7 @@ class TestReadTelegram(unittest.TestCase):
             'zamal_core.control_center': mock_cc_mod,
             'zamal_core.telegram_bot': mock_tg_mod,
         }):
-            items = _read_telegram(limit=5)
+            items = _read_telegram(limit=5, _auth=self._make_auth())
         self.assertEqual(items, [])
 
     def test_returns_empty_on_api_exception(self):
@@ -742,7 +770,7 @@ class TestReadTelegram(unittest.TestCase):
             'zamal_core.control_center': mock_cc_mod,
             'zamal_core.telegram_bot': mock_tg_mod,
         }):
-            items = _read_telegram(limit=5)
+            items = _read_telegram(limit=5, _auth=self._make_auth())
         self.assertEqual(items, [])
 
     def test_parses_updates_into_channel_items(self):
@@ -767,7 +795,7 @@ class TestReadTelegram(unittest.TestCase):
             'zamal_core.control_center': mock_cc_mod,
             'zamal_core.telegram_bot': mock_tg_mod,
         }):
-            items = _read_telegram(limit=5)
+            items = _read_telegram(limit=5, _auth=self._make_auth())
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].channel, 'telegram')
         self.assertEqual(items[0].item_id, '101')
@@ -1246,6 +1274,13 @@ class TestProposalRegistry(unittest.TestCase):
 class TestMessengerChannel(unittest.TestCase):
     """Messenger is a distinct channel from Facebook."""
 
+    def _make_auth(self):
+        from zamal_core.private_read_auth import PRIVATE_READ_REGISTRY
+        return PRIVATE_READ_REGISTRY.authorize(
+            task_id='test-messenger', channel='messenger', target='*',
+            purpose='unit test', scope='inbox_list', ttl_seconds=30,
+        )
+
     def test_messenger_in_channels_set(self):
         """'messenger' is a valid channel in ChannelAdapter.CHANNELS."""
         self.assertIn('messenger', ChannelAdapter.CHANNELS)
@@ -1272,7 +1307,7 @@ class TestMessengerChannel(unittest.TestCase):
                 {'id': '2', 'hasUnread': False},
             ], 'inMessenger': True})),
         ]
-        items = _read_messenger(limit=3)
+        items = _read_messenger(limit=3, _auth=self._make_auth())
         self.assertEqual(len(items), 3)
         for it in items:
             self.assertEqual(it.channel, 'messenger')
@@ -1410,6 +1445,13 @@ class TestDraftAndDeleteProposal(unittest.TestCase):
 class TestGmailSearch(unittest.TestCase):
     """Tests for Gmail search query filtering."""
 
+    def _make_auth(self):
+        from zamal_core.private_read_auth import PRIVATE_READ_REGISTRY
+        return PRIVATE_READ_REGISTRY.authorize(
+            task_id='test-gmail-search', channel='gmail', target='*',
+            purpose='unit test', scope='inbox_list', ttl_seconds=30,
+        )
+
     @patch('zamal_core.ai_browser_transport._exec_js_in_domain')
     def test_gmail_query_filters_results(self, mock_js):
         """_read_gmail() with query applies client-side filtering."""
@@ -1417,7 +1459,7 @@ class TestGmailSearch(unittest.TestCase):
             {'id': '1', 'subject': 'Job offer at TechCorp', 'preview': 'We are hiring...', 'time': ''},
             {'id': '2', 'subject': 'Your electricity bill', 'preview': 'Payment due...', 'time': ''},
         ]))
-        items = _read_gmail(limit=10, query='job')
+        items = _read_gmail(limit=10, query='job', _auth=self._make_auth())
         subjects = [it.subject for it in items]
         self.assertTrue(any('Job' in s or 'job' in s.lower() for s in subjects))
 
@@ -1428,7 +1470,7 @@ class TestGmailSearch(unittest.TestCase):
             {'id': '1', 'subject': 'Subject A', 'preview': 'A...', 'time': ''},
             {'id': '2', 'subject': 'Subject B', 'preview': 'B...', 'time': ''},
         ]))
-        items = _read_gmail(limit=10, query='')
+        items = _read_gmail(limit=10, query='', _auth=self._make_auth())
         self.assertEqual(len(items), 2)
 
     @patch('zamal_core.ai_browser_transport._exec_js_in_domain')
@@ -1438,7 +1480,7 @@ class TestGmailSearch(unittest.TestCase):
             {'id': '1', 'subject': 'Contact us at test@example.com',
              'preview': 'Call +1-555-123-4567 for support', 'time': ''},
         ]))
-        items = _read_gmail(limit=10, query='')
+        items = _read_gmail(limit=10, query='', _auth=self._make_auth())
         for it in items:
             self.assertNotIn('test@example.com', it.subject)
             self.assertNotIn('+1-555-123-4567', it.preview)
@@ -1446,6 +1488,17 @@ class TestGmailSearch(unittest.TestCase):
 
 class TestWhatsAppSearch(unittest.TestCase):
     """Tests for WhatsApp search query support."""
+
+    def _make_auth(self, target='*'):
+        from zamal_core.private_read_auth import PRIVATE_READ_REGISTRY
+        return PRIVATE_READ_REGISTRY.authorize(
+            task_id='test-wa-search',
+            channel='whatsapp',
+            target=target,
+            purpose='unit test',
+            scope='inbox_list',
+            ttl_seconds=30,
+        )
 
     @patch('zamal_core.ai_browser_transport._exec_js_in_domain')
     def test_whatsapp_search_calls_js_search(self, mock_js):
@@ -1455,7 +1508,8 @@ class TestWhatsAppSearch(unittest.TestCase):
             (True, json.dumps([{'id': '0', 'preview': 'Plumbing service inquiry'}])),
         ]
         from zamal_core.channel_adapter import _read_whatsapp
-        items = _read_whatsapp(limit=5, query='plumbing')
+        auth = self._make_auth()
+        items = _read_whatsapp(limit=5, query='plumbing', _auth=auth)
         self.assertGreaterEqual(len(items), 0)
         # Two calls: search activation + list read
         self.assertEqual(mock_js.call_count, 2)
@@ -1465,7 +1519,8 @@ class TestWhatsAppSearch(unittest.TestCase):
         """_read_whatsapp() without query makes only one JS call."""
         mock_js.return_value = (True, json.dumps([{'id': '0', 'preview': ''}]))
         from zamal_core.channel_adapter import _read_whatsapp
-        _read_whatsapp(limit=5, query='')
+        auth = self._make_auth()
+        _read_whatsapp(limit=5, query='', _auth=auth)
         self.assertEqual(mock_js.call_count, 1)
 
 

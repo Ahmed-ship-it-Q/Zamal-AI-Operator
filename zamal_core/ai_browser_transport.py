@@ -326,7 +326,20 @@ def _open_tab(url: str) -> bool:
 
 
 def _exec_js_in_domain(domain: str, js: str, timeout: int = 12) -> tuple:
-    """Execute JS in the active Chrome tab matching domain; fall back to last match."""
+    """Execute JS in the active Chrome tab matching domain; fall back to last match.
+
+    Broad DOM/page-text extraction patterns are blocked for private-message domains
+    (mail, WhatsApp, Messenger, Instagram, Facebook). The call is rejected with
+    (False, 'BROAD_EXTRACTION_BLOCKED:<pattern>') before any AppleScript runs.
+    """
+    try:
+        from .private_read_auth import check_js_for_broad_extraction, record_privacy_incident
+        bad = check_js_for_broad_extraction(domain, js)
+        if bad:
+            record_privacy_incident(domain, 'broad_extraction_blocked', f'pattern={bad[:60]}')
+            return False, f'BROAD_EXTRACTION_BLOCKED:{bad[:80]}'
+    except ImportError:
+        pass
     js_safe = js.replace('\\', '\\\\').replace('"', '\\"')
     # Prefer active tab first, then last matching tab
     script = (
