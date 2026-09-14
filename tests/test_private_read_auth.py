@@ -32,6 +32,17 @@ def _fresh_registry():
 class TestDefaultDenyPrivateRead(unittest.TestCase):
     """Without authorization the _read_* functions must return DENIED metadata."""
 
+    def setUp(self):
+        from zamal_core.private_read_auth import PrivateReadRegistry
+        self._reg_patch = patch(
+            'zamal_core.private_read_auth.PRIVATE_READ_REGISTRY',
+            PrivateReadRegistry(),
+        )
+        self._reg_patch.start()
+
+    def tearDown(self):
+        self._reg_patch.stop()
+
     def _assert_denied(self, items, channel):
         self.assertIsInstance(items, list)
         self.assertEqual(len(items), 1, f'{channel}: expected exactly one metadata item')
