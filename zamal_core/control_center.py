@@ -638,6 +638,23 @@ _HTML_UI = '''<!DOCTYPE html>
     <button class="submit-btn" onclick="submitAITask()" style="background:#553c9a">Route via AI</button>
     <div id="ai-task-status" style="font-size:11px;color:#718096;margin-top:4px"></div>
     <hr class="section-sep">
+    <div class="section-title">Channel Action Proposal</div>
+    <select id="ch-channel" style="background:#1a1d2e;border:1px solid #2d3748;color:#e2e8f0;padding:4px 8px;border-radius:4px;width:100%;margin-bottom:6px;font-size:12px">
+      <option value="telegram">Telegram</option>
+      <option value="gmail">Gmail</option>
+      <option value="whatsapp">WhatsApp</option>
+      <option value="facebook">Facebook</option>
+      <option value="instagram">Instagram</option>
+      <option value="calendar">Calendar</option>
+    </select>
+    <input id="ch-destination" placeholder="Destination (sanitized)" style="background:#1a1d2e;border:1px solid #2d3748;color:#e2e8f0;padding:4px 8px;border-radius:4px;width:100%;box-sizing:border-box;margin-bottom:6px;font-size:12px"/>
+    <textarea id="ch-content" placeholder="Content / event title..." style="background:#1a1d2e;border:1px solid #2d3748;color:#e2e8f0;padding:6px 8px;border-radius:4px;width:100%;box-sizing:border-box;height:60px;font-size:12px;resize:vertical;margin-bottom:6px"></textarea>
+    <button class="submit-btn" onclick="createChannelProposal()" style="background:#2b6cb0;font-size:12px">Create Proposal</button>
+    <div id="ch-status" style="font-size:11px;color:#718096;margin-top:4px"></div>
+    <hr class="section-sep">
+    <div class="section-title">Pending Proposals</div>
+    <div id="proposals-list" style="font-size:12px;color:#718096">Loading...</div>
+    <hr class="section-sep">
     <div class="section-title">Connections</div>
     <table class="status-table" id="status-table">
       <tbody id="status-body"><tr><td colspan="2" style="color:#718096">Loading...</td></tr></tbody>
@@ -925,8 +942,68 @@ function refresh() {
   refreshAIProviders();
 }
 
+function createChannelProposal() {
+  var ch=document.getElementById('ch-channel').value;
+  var dest=document.getElementById('ch-destination').value.trim();
+  var content=document.getElementById('ch-content').value.trim();
+  var status=document.getElementById('ch-status');
+  if(!dest||!content){status.textContent='destination and content required';return;}
+  status.textContent='Creating proposal...';
+  apiFetch('/api/channel/propose',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({channel:ch,destination:dest,content:content})})
+  .then(function(d){
+    status.textContent='PENDING: '+d.proposal_id.substring(0,8)+' | ch='+d.channel+' | approval='+d.approval_id.substring(0,8);
+    refreshProposals();
+  }).catch(function(e){status.textContent='ERROR: '+e.message;});
+}
+
+function refreshProposals() {
+  apiFetch('/api/channel/proposals').then(function(proposals) {
+    var el=document.getElementById('proposals-list');
+    if(!proposals.length){el.textContent='No proposals';return;}
+    el.innerHTML=proposals.map(function(p){
+      var id8=p.proposal_id.substring(0,8);
+      var btns='';
+      if(p.status==='PENDING'){
+        btns='<button onclick="approveProposal(\''+p.proposal_id+'\')" style="background:#276749;color:#c6f6d5;border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:10px;margin-right:4px">APPROVE</button>'+
+             '<button onclick="rejectProposal(\''+p.proposal_id+'\')" style="background:#742a2a;color:#fed7d7;border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:10px">REJECT</button>';
+      }
+      return '<div style="border:1px solid #2d3748;border-radius:4px;padding:6px;margin-bottom:4px">'+
+        '<div style="font-size:10px;color:#a0aec0">'+id8+' | '+p.channel+' → '+p.destination+'</div>'+
+        '<div style="font-size:11px;margin:2px 0">'+escHtml(p.preview.substring(0,100))+'</div>'+
+        '<div style="display:flex;align-items:center;gap:6px;margin-top:4px">'+
+          '<span class="badge badge-'+p.status+'">'+p.status+'</span>'+btns+
+        '</div>'+
+        '<div id="pr-result-'+p.proposal_id.substring(0,8)+'" style="font-size:10px;color:#68d391;margin-top:2px"></div>'+
+      '</div>';
+    }).join('');
+  }).catch(function(){});
+}
+
+function approveProposal(proposalId) {
+  apiFetch('/api/channel/approve',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({proposal_id:proposalId,actor:'cc_user'})})
+  .then(function(d){
+    var el=document.getElementById('pr-result-'+proposalId.substring(0,8));
+    if(el) el.textContent='APPROVED: '+JSON.stringify(d).substring(0,80);
+    refreshProposals();
+  }).catch(function(e){showMsg('Approve error: '+e.message,true);});
+}
+
+function rejectProposal(proposalId) {
+  apiFetch('/api/channel/reject',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({proposal_id:proposalId,actor:'cc_user'})})
+  .then(function(d){
+    var el=document.getElementById('pr-result-'+proposalId.substring(0,8));
+    if(el) el.textContent='REJECTED: external_action='+d.external_action;
+    refreshProposals();
+  }).catch(function(e){showMsg('Reject error: '+e.message,true);});
+}
+
 setInterval(refresh, 5000);
+setInterval(refreshProposals, 3000);
 refresh();
+refreshProposals();
 </script>
 </body>
 </html>'''
@@ -997,6 +1074,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_cpc_status()
             elif path == '/api/ai-providers':
                 self._handle_ai_providers()
+            elif path == '/api/channel/proposals':
+                self._handle_channel_proposals()
             else:
                 self._error(404, 'Not found')
         except Exception as exc:
@@ -1020,6 +1099,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_ai_task(body)
             elif path == '/api/ai-health-check':
                 self._handle_ai_health_check(body)
+            elif path == '/api/channel/propose':
+                self._handle_channel_propose(body)
+            elif path == '/api/channel/approve':
+                self._handle_channel_approve(body)
+            elif path == '/api/channel/reject':
+                self._handle_channel_reject(body)
             else:
                 self._error(404, 'Not found')
         except json.JSONDecodeError:
@@ -1346,6 +1431,106 @@ class _Handler(BaseHTTPRequestHandler):
             router = get_router()
             result = router.force_health_check(provider)
             self._send_json(_sanitize_obj(result))
+        except Exception as exc:
+            self._error(500, str(exc))
+
+    def _handle_channel_proposals(self):
+        """GET /api/channel/proposals — list all proposals with status."""
+        try:
+            from .channel_adapter import get_channel_adapter
+            ca = get_channel_adapter()
+            proposals = ca.all_proposals()
+            self._send_json([{
+                'proposal_id': p.proposal_id,
+                'channel': p.channel,
+                'action': p.action,
+                'destination': p.destination,
+                'preview': p.preview[:200],
+                'status': p.status,
+                'task_id': p.task_id,
+                'approval_id': p.approval_id,
+                'timestamp': p.timestamp,
+            } for p in proposals])
+        except Exception as exc:
+            self._error(500, str(exc))
+
+    def _handle_channel_propose(self, body):
+        """POST /api/channel/propose — create a channel proposal."""
+        channel = str(body.get('channel', '')).strip()
+        destination = str(body.get('destination', '')).strip()
+        content = str(body.get('content', '')).strip()
+        task_id = str(body.get('task_id', '')).strip()
+        if not channel or not destination or not content:
+            self._error(400, 'channel, destination, and content required')
+            return
+        try:
+            from .channel_adapter import get_channel_adapter
+            ca = get_channel_adapter()
+            if channel == 'calendar':
+                proposal = ca.propose_calendar_event(
+                    title=content[:200],
+                    start_dt=str(body.get('start_dt', '')),
+                    end_dt=str(body.get('end_dt', '')),
+                    task_id=task_id,
+                )
+            else:
+                proposal = ca.propose_send(
+                    channel=channel,
+                    destination=destination,
+                    content=content,
+                    task_id=task_id,
+                )
+            self._send_json({
+                'ok': True,
+                'proposal_id': proposal.proposal_id,
+                'channel': proposal.channel,
+                'destination': proposal.destination,
+                'preview': proposal.preview[:200],
+                'status': proposal.status,
+                'approval_id': proposal.approval_id,
+                'task_id': proposal.task_id,
+                'timestamp': proposal.timestamp,
+            })
+        except ValueError as exc:
+            self._error(400, str(exc))
+        except Exception as exc:
+            self._error(500, str(exc))
+
+    def _handle_channel_approve(self, body):
+        """POST /api/channel/approve — approve and execute a proposal."""
+        proposal_id = str(body.get('proposal_id', '')).strip()
+        actor = str(body.get('actor', 'cc_user')).strip()
+        if not proposal_id:
+            self._error(400, 'proposal_id required')
+            return
+        try:
+            from .channel_adapter import get_channel_adapter
+            ca = get_channel_adapter()
+            proposal = ca.get_proposal(proposal_id)
+            if proposal is None:
+                self._error(404, 'proposal_not_found')
+                return
+            result = ca.execute_approved(proposal, approval_id=proposal.approval_id, actor=actor)
+            self._send_json(_sanitize_obj(result))
+        except Exception as exc:
+            self._error(500, str(exc))
+
+    def _handle_channel_reject(self, body):
+        """POST /api/channel/reject — reject a proposal (zero external action)."""
+        proposal_id = str(body.get('proposal_id', '')).strip()
+        actor = str(body.get('actor', 'cc_user')).strip()
+        if not proposal_id:
+            self._error(400, 'proposal_id required')
+            return
+        try:
+            from .channel_adapter import get_channel_adapter
+            ca = get_channel_adapter()
+            proposal = ca.get_proposal(proposal_id)
+            if proposal is None:
+                self._error(404, 'proposal_not_found')
+                return
+            result = ca.execute_rejected(proposal, actor=actor)
+            self._send_json(result)
         except Exception as exc:
             self._error(500, str(exc))
 

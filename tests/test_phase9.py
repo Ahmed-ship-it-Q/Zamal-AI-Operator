@@ -291,9 +291,9 @@ class ApprovalTests(unittest.TestCase):
 
     def test_expiry_during_slow_preflight_denied(self):
         class Slow:
-            def validate(self,p,project):time.sleep(.03)
+            def validate(self,p,project):time.sleep(.6)
             def __call__(self,p):raise AssertionError('Must not dispatch')
-        g=Gate(self.s,{'payment':Slow()});a=g.propose(self.task()['id'],'payment',{},uid(),ttl_seconds=.02)
+        g=Gate(self.s,{'payment':Slow()});a=g.propose(self.task()['id'],'payment',{},uid(),ttl_seconds=.5)
         self.approve(a)
         with self.assertRaises(Denied):g.execute(a['id'])
         self.assertEqual(self.s.action(a['id'])['status'],'PENDING')

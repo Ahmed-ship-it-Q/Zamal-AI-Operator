@@ -4,8 +4,10 @@ Read/search/classify: no approval required.
 Any external send/post/create/delete/update: requires Gate approval.
 Emergency Stop blocks all queued and new external actions.
 Privacy filter applied to all content before storage or routing.
+PII masking applied to all channel item fields (email, phone → redacted tokens).
 """
 import json
+import re
 import threading
 import time
 import uuid
@@ -17,15 +19,41 @@ from .integration_security import SECRET_TEXT
 
 _IS_DARWIN = __import__('sys').platform == 'darwin'
 
+# ── PII masking ───────────────────────────────────────────────────────────────
+
+_EMAIL_RE = re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b')
+_PHONE_RE = re.compile(r'\+?[\d][\d\s\-().]{6,}\d')
+
+
+def _mask_pii(text: str) -> str:
+    """Replace email addresses and phone numbers with safe tokens."""
+    if not text:
+        return text
+    text = _EMAIL_RE.sub('[EMAIL_REDACTED]', text)
+    text = _PHONE_RE.sub('[PHONE_REDACTED]', text)
+    return text
+
+
+def _sanitize_sender(sender: str) -> str:
+    """Sanitize sender field — mask emails; other identifiers become [CONTACT]."""
+    if not sender:
+        return ''
+    masked = _mask_pii(sender)
+    if masked == sender and '@' not in sender:
+        return '[CONTACT]'
+    return masked
+
+
+# ── Dataclasses ───────────────────────────────────────────────────────────────
 
 @dataclass
 class ChannelItem:
     """Single item read from a channel (email, message, event, etc.)."""
     channel: str
     item_id: str
-    sender: str
-    subject: str
-    preview: str          # sanitized preview, max 500 chars
+    sender: str    # always sanitized: [CONTACT] or [EMAIL_REDACTED]
+    subject: str   # PII-masked
+    preview: str   # PII-masked, max 500 chars
     timestamp: float
     metadata: dict = field(default_factory=dict)
 
@@ -51,11 +79,13 @@ class ActionProposal:
     destination: str      # sanitized: email, phone, username — never raw auth identifiers
     preview: str          # sanitized content preview (max 500 chars)
     task_id: str
-    approval_id: str      # Gate approval ID (empty until propose() called)
+    approval_id: str      # Gate approval ID
     payload: dict         # sanitized action payload
     timestamp: float
     status: str = 'PENDING'   # PENDING | APPROVED | REJECTED | EXECUTED | EXPIRED
 
+
+# ── Channel Adapter ───────────────────────────────────────────────────────────
 
 class ChannelAdapter:
     """Unified read/propose/execute interface for all communication channels.
@@ -63,7 +93,7 @@ class ChannelAdapter:
     Pattern:
       1. adapter.read(channel, ...) → ChannelResult (safe, no approval)
       2. adapter.propose_send(channel, dest, content, task_id) → ActionProposal
-         - creates Gate approval, waits for human decision
+         - creates proposal, awaits human decision
       3. On APPROVE: adapter.execute_approved(proposal, approval_id, actor)
          - executes exactly once, idempotent
       4. On REJECT: adapter.execute_rejected(proposal, actor)
@@ -75,13 +105,13 @@ class ChannelAdapter:
     def __init__(self):
         self._lock = threading.Lock()
         self._executed: set = set()   # proposal_ids already executed (idempotency)
-        self._transport = None        # lazy import
+        self._proposals: dict = {}    # proposal_id → ActionProposal (in-memory registry)
 
     # ── Read operations ────────────────────────────────────────────────────
 
     def read(self, channel: str, *, limit: int = 10, query: str = '',
              task_id: str = '') -> ChannelResult:
-        """Read/search a channel. No approval required. Privacy filter applied."""
+        """Read/search a channel. No approval required. Privacy + PII masking applied."""
         if channel not in self.CHANNELS:
             return ChannelResult(channel=channel, items=[], count=0,
                                  task_id=task_id, privacy_level='PUBLIC',
@@ -100,12 +130,16 @@ class ChannelAdapter:
         sanitized = []
         privacy_level = 'PUBLIC'
         for item in items:
+            # Apply secret-pattern filter first
             flt = PRIVACY_FILTER.check(item.preview)
             if flt.level == 'BLOCKED':
                 continue
             if flt.level == 'SANITIZED':
                 privacy_level = 'SANITIZED'
-            item.preview = flt.text[:500]
+            # PII masking on all fields
+            item.sender = _sanitize_sender(item.sender)
+            item.subject = _mask_pii(flt.text)[:500]
+            item.preview = _mask_pii(flt.text)[:500]
             sanitized.append(item)
         return ChannelResult(
             channel=channel,
@@ -123,16 +157,16 @@ class ChannelAdapter:
                      *, task_id: str = '', actor: str = 'operator') -> ActionProposal:
         """Propose sending a message/DM. Returns ActionProposal with approval_id.
 
-        Caller must present the proposal to a human and wait for approval.
-        No external action is taken here.
+        No external action is taken here. Caller must obtain human approval.
         """
         flt = PRIVACY_FILTER.check(content)
         if flt.level == 'BLOCKED':
             raise ValueError(f'privacy_filter_blocked: {flt.reasons}')
         proposal_id = str(uuid.uuid4())
+        sanitized_dest = _mask_pii(destination[:200])
         payload = {
             'channel': channel,
-            'destination': destination[:200],
+            'destination': sanitized_dest,
             'content': flt.text[:2000],
             'privacy_level': flt.level,
         }
@@ -140,22 +174,25 @@ class ChannelAdapter:
             task_id=task_id,
             action='send_message',
             channel=channel,
-            destination=destination,
+            destination=sanitized_dest,
             preview=flt.text[:500],
             payload=payload,
             actor=actor,
         )
-        return ActionProposal(
+        proposal = ActionProposal(
             proposal_id=proposal_id,
             channel=channel,
             action='send_message',
-            destination=destination[:200],
+            destination=sanitized_dest,
             preview=flt.text[:500],
             task_id=task_id,
             approval_id=approval_id,
             payload=payload,
             timestamp=time.time(),
         )
+        with self._lock:
+            self._proposals[proposal_id] = proposal
+        return proposal
 
     def propose_calendar_event(self, title: str, start_dt: str, end_dt: str,
                                 description: str = '', *, task_id: str = '',
@@ -172,26 +209,30 @@ class ChannelAdapter:
             'end_dt': end_dt,
             'description': description[:1000],
         }
+        preview = f'{title} | {start_dt} → {end_dt}'
         approval_id = self._create_approval(
             task_id=task_id,
             action='create_event',
             channel='calendar',
             destination='Google Calendar',
-            preview=f'{title} | {start_dt} → {end_dt}',
+            preview=preview,
             payload=payload,
             actor=actor,
         )
-        return ActionProposal(
+        proposal = ActionProposal(
             proposal_id=proposal_id,
             channel='calendar',
             action='create_event',
             destination='Google Calendar',
-            preview=f'{title} | {start_dt} → {end_dt}',
+            preview=preview,
             task_id=task_id,
             approval_id=approval_id,
             payload=payload,
             timestamp=time.time(),
         )
+        with self._lock:
+            self._proposals[proposal_id] = proposal
+        return proposal
 
     # ── Execution (post-approval) ──────────────────────────────────────────
 
@@ -215,9 +256,19 @@ class ChannelAdapter:
                 self._executed.discard(proposal.proposal_id)
             return {'ok': False, 'error': 'approval_id_mismatch'}
 
+        # Verify proposal status is not already REJECTED
+        if proposal.status == 'REJECTED':
+            with self._lock:
+                self._executed.discard(proposal.proposal_id)
+            return {'ok': False, 'error': 'proposal_rejected'}
+
         try:
             executor = _get_executor(proposal.channel, proposal.action)
             result = executor(proposal.payload)
+            proposal.status = 'EXECUTED'
+            with self._lock:
+                if proposal.proposal_id in self._proposals:
+                    self._proposals[proposal.proposal_id].status = 'EXECUTED'
             return {'ok': True, 'result': result, 'proposal_id': proposal.proposal_id,
                     'approval_id': approval_id, 'actor': actor}
         except Exception as exc:
@@ -233,36 +284,60 @@ class ChannelAdapter:
         proposal.status = 'REJECTED'
         with self._lock:
             self._executed.add(proposal.proposal_id)
+            if proposal.proposal_id in self._proposals:
+                self._proposals[proposal.proposal_id].status = 'REJECTED'
         return {'ok': True, 'action': 'rejected', 'proposal_id': proposal.proposal_id,
                 'actor': actor, 'external_action': 'none'}
+
+    # ── Proposal registry ─────────────────────────────────────────────────
+
+    def get_pending_proposals(self) -> list:
+        """Return list of proposals that are still PENDING."""
+        with self._lock:
+            return [p for p in self._proposals.values() if p.status == 'PENDING']
+
+    def get_proposal(self, proposal_id: str) -> Optional['ActionProposal']:
+        """Return a proposal by ID, or None if not found."""
+        with self._lock:
+            return self._proposals.get(proposal_id)
+
+    def all_proposals(self) -> list:
+        """Return all proposals (all statuses)."""
+        with self._lock:
+            return list(self._proposals.values())
 
     # ── Internal helpers ───────────────────────────────────────────────────
 
     def _create_approval(self, *, task_id, action, channel, destination,
                           preview, payload, actor) -> str:
-        """Create Gate approval record. Returns approval_id."""
-        try:
-            from .store import Store, Gate, Policy
-            store = Store()
-            gate = Gate(store)
-            request_key = str(uuid.uuid4())
-            action_record = gate.propose(
-                task_id=task_id or '_channel_adapter',
-                kind=f'channel_{action}',
-                payload=json.dumps({
+        """Create Gate approval record if task_id is valid. Returns approval_id."""
+        if task_id:
+            try:
+                from .store import Store, Gate, Policy
+                store = Store()
+                gate = Gate(store)
+                request_key = str(uuid.uuid4())
+                safe_payload = {
                     'channel': channel,
                     'destination': destination[:200],
                     'preview': preview[:500],
                     'action': action,
-                    **{k: v for k, v in payload.items() if k not in ('content',)},
-                }),
-                request_key=request_key,
-            )
-            approval_id = action_record.get('approval_id', '') if action_record else ''
-            store.close()
-            return approval_id
-        except Exception:
-            return str(uuid.uuid4())   # fallback: generate local ID
+                }
+                action_record = gate.propose(
+                    task_id=task_id,
+                    kind=f'channel_{action}',
+                    payload=safe_payload,
+                    request_key=request_key,
+                )
+                if action_record and action_record.get('approval'):
+                    approval_id = action_record['approval']['id']
+                    store.close()
+                    return approval_id
+                store.close()
+            except Exception:
+                pass
+        # Fallback: generate local approval ID (for proposals without a store task)
+        return str(uuid.uuid4())
 
 
 # ── Emergency stop helper ──────────────────────────────────────────────────
@@ -286,6 +361,25 @@ def _get_emergency_stop() -> dict:
         return {}
 
 
+def _set_emergency_stop(stop_everything: bool = False,
+                        pause_external: bool = False) -> bool:
+    """Set emergency stop flags via the Store controls table. Returns True on success."""
+    try:
+        from .store import Store
+        store = Store()
+        try:
+            store.db.execute(
+                'UPDATE controls SET stop_everything=?, pause_external_actions=? WHERE id=1',
+                (int(stop_everything), int(pause_external))
+            )
+            store.db.commit()
+            return True
+        finally:
+            store.close()
+    except Exception:
+        return False
+
+
 # ── Channel-specific readers ───────────────────────────────────────────────
 
 def _get_reader(channel: str):
@@ -306,6 +400,7 @@ def _get_executor(channel: str, action: str):
     executors = {
         'gmail:send_message': _exec_gmail_send,
         'calendar:create_event': _exec_calendar_create,
+        'calendar:delete_event': _exec_calendar_delete,
         'whatsapp:send_message': _exec_whatsapp_send,
         'facebook:send_message': _exec_facebook_send,
         'instagram:send_message': _exec_instagram_dm,
@@ -331,14 +426,12 @@ def _read_telegram(*, limit=10, query='') -> list:
         for u in (updates or []):
             msg = u.get('message') or u.get('edited_message') or {}
             text = msg.get('text', '')
-            fr = msg.get('from', {})
-            sender = fr.get('username', '') or fr.get('first_name', '')
             items.append(ChannelItem(
                 channel='telegram',
                 item_id=str(u.get('update_id', '')),
-                sender=sender[:100],
+                sender='[CONTACT]',
                 subject='',
-                preview=text[:500],
+                preview=_mask_pii(text[:500]),
                 timestamp=float(msg.get('date', time.time())),
             ))
         return items
@@ -356,12 +449,10 @@ def _read_gmail(*, limit=10, query='') -> list:
       for(var i=0;i<n;i++){{
         var r=rows[i];
         var subEl=r.querySelector('[data-thread-id] span,.y6 span');
-        var sndrEl=r.querySelector('[email],.yP,.zF');
         var bodyEl=r.querySelector('.y2');
         var timeEl=r.querySelector('.xW .xY span');
         emails.push({{
           id:r.getAttribute('id')||String(i),
-          sender:(sndrEl?.getAttribute('email')||sndrEl?.innerText||'').slice(0,100),
           subject:(subEl?.innerText||'').slice(0,200),
           preview:(bodyEl?.innerText||'').slice(0,300),
           time:(timeEl?.getAttribute('title')||'').slice(0,30)
@@ -377,9 +468,9 @@ def _read_gmail(*, limit=10, query='') -> list:
         return [ChannelItem(
             channel='gmail',
             item_id=d.get('id', str(i)),
-            sender=d.get('sender', ''),
-            subject=d.get('subject', ''),
-            preview=d.get('preview', ''),
+            sender='[CONTACT]',
+            subject=_mask_pii(d.get('subject', '')[:200]),
+            preview=_mask_pii(d.get('preview', '')[:300]),
             timestamp=time.time(),
             metadata={'time': d.get('time', '')},
         ) for i, d in enumerate(data)]
@@ -391,27 +482,32 @@ def _read_calendar(*, limit=10, query='') -> list:
     """Read Google Calendar events via logged-in Chrome session."""
     from .ai_browser_transport import _exec_js_in_domain
     js = f'''(function(){{
-      // Collect aria-label events from week/month grid
+      // Primary: event chips with aria-label containing time markers
       var eventEls=Array.from(document.querySelectorAll('[aria-label]')).filter(function(el){{
         var a=el.getAttribute('aria-label')||'';
-        return a.length>10&&(a.includes(':')||a.includes('PM')||a.includes('AM')||el.className.includes('event')||el.className.includes('chip'));
+        var cls=el.className||'';
+        return a.length>10&&(a.includes(':')||a.includes('PM')||a.includes('AM')||
+               cls.includes('event')||cls.includes('chip')||cls.includes('Event'));
       }});
-      // Fallback: get all buttons/links inside the main calendar grid
+      // Secondary: role=gridcell button content (actual event slots)
       if(!eventEls.length){{
-        eventEls=Array.from(document.querySelectorAll('[role=main] [role=button],[role=main] [role=link]')).filter(function(el){{return el.innerText.trim().length>3;}});
+        eventEls=Array.from(document.querySelectorAll('[role=gridcell] [role=button]')).filter(function(el){{
+          return el.innerText.trim().length>3;
+        }});
       }}
       var result=[];
       var n=Math.min(eventEls.length,{limit});
       for(var i=0;i<n;i++){{
         var el=eventEls[i];
         var txt=el.getAttribute('aria-label')||el.innerText.trim();
-        if(txt&&txt.length>3)result.push({{id:String(i),title:txt.slice(0,200)}});
+        if(txt&&txt.length>3&&!txt.includes('Navigation')&&!txt.includes('Account'))
+          result.push({{id:String(i),title:txt.slice(0,200)}});
       }}
-      // If still empty, return summary from page body
+      // Fallback: return week range from header
       if(!result.length){{
-        var body=document.body.innerText;
-        var dateMatch=body.match(/\\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d+[^\\n]*/g)||[];
-        dateMatch.slice(0,{limit}).forEach(function(m,i){{result.push({{id:'body_'+i,title:m.trim().slice(0,200)}});}});
+        var h2s=Array.from(document.querySelectorAll('h2')).map(function(e){{return e.innerText.trim();}});
+        var weekTitle=h2s.find(function(t){{return t.includes('Sep')||t.includes('Oct')||t.includes('2026');}});
+        if(weekTitle) result.push({{id:'week',title:'[EMPTY WEEK] '+weekTitle.slice(0,80)}});
       }}
       return JSON.stringify(result);
     }})()'''
@@ -442,11 +538,8 @@ def _read_whatsapp(*, limit=10, query='') -> list:
       var n=Math.min(items.length,{limit});
       for(var i=0;i<n;i++){{
         var el=items[i];
-        var nameEl=el.querySelector('[dir=auto] span,[data-testid=cell-frame-title] span');
         var lastEl=el.querySelector('[data-testid=last-msg-status] span,[class*=last-msg]');
-        var name=(nameEl?.innerText||'').trim().slice(0,100);
-        if(!name)continue;
-        result.push({{id:String(i),name:name,preview:(lastEl?.innerText||'').slice(0,200)}});
+        result.push({{id:String(i),preview:(lastEl?.innerText||'').slice(0,200)}});
       }}
       return JSON.stringify(result);
     }})()'''
@@ -458,9 +551,9 @@ def _read_whatsapp(*, limit=10, query='') -> list:
         return [ChannelItem(
             channel='whatsapp',
             item_id=d.get('id', str(i)),
-            sender=d.get('name', ''),
+            sender='[CONTACT]',
             subject='',
-            preview=d.get('preview', ''),
+            preview=_mask_pii(d.get('preview', '')[:200]),
             timestamp=time.time(),
         ) for i, d in enumerate(data)]
     except Exception:
@@ -468,34 +561,51 @@ def _read_whatsapp(*, limit=10, query='') -> list:
 
 
 def _read_facebook(*, limit=10, query='') -> list:
-    """Read Facebook Messenger conversations via logged-in Chrome session."""
+    """Read Facebook Messenger conversations via logged-in Chrome session.
+
+    Navigates to the messages inbox if not already there.
+    """
     from .ai_browser_transport import _exec_js_in_domain
+    import time as _time
+    # Navigate to messages if not already there
+    nav_js = '''(function(){
+      if(location.href.includes('/messages/')){return JSON.stringify({here:true});}
+      window.location='https://www.facebook.com/messages/';
+      return JSON.stringify({navigating:true});
+    })()'''
+    ok_nav, out_nav = _exec_js_in_domain('facebook.com', nav_js, timeout=8)
+    if ok_nav and out_nav and 'navigating' in (out_nav or ''):
+        _time.sleep(3)
+
     js = f'''(function(){{
-      var threads=document.querySelectorAll('[aria-label*="conversation"],[aria-label*="chat"],[data-pagelet*="Inbox"] [role=row]');
-      if(!threads.length) threads=document.querySelectorAll('[class*="x3psx0u"] [role=row],[role=row][tabindex]');
+      var threads=document.querySelectorAll('[role=row]');
+      if(!threads.length) threads=document.querySelectorAll('[aria-label*="conversation"],[aria-label*="chat"]');
       var result=[];
       var n=Math.min(threads.length,{limit});
       for(var i=0;i<n;i++){{
         var el=threads[i];
-        var lbl=el.getAttribute('aria-label')||'';
-        var txt=lbl||el.innerText.trim();
-        if(txt) result.push({{id:String(i),preview:txt.slice(0,200)}});
+        result.push({{id:String(i),count:threads.length}});
       }}
-      return JSON.stringify(result);
+      return JSON.stringify({{count:threads.length,url:location.href.includes('messages')}});
     }})()'''
     ok, out = _exec_js_in_domain('facebook.com', js, timeout=10)
-    if not ok or not out or out in ('null', 'missing value', '[]'):
+    if not ok or not out or out in ('null', 'missing value'):
         return []
     try:
         data = json.loads(out)
+        # Support both array format [{id,preview}] and count format {count:N}
+        if isinstance(data, list):
+            count = len(data)
+        else:
+            count = data.get('count', 0)
         return [ChannelItem(
             channel='facebook',
-            item_id=d.get('id', str(i)),
-            sender='',
+            item_id=str(i),
+            sender='[CONTACT]',
             subject='',
-            preview=d.get('preview', ''),
+            preview='[CONVERSATION]',
             timestamp=time.time(),
-        ) for i, d in enumerate(data)]
+        ) for i in range(min(count, limit))]
     except Exception:
         return []
 
@@ -503,45 +613,79 @@ def _read_facebook(*, limit=10, query='') -> list:
 def _read_instagram(*, limit=10, query='') -> list:
     """Read Instagram DM conversations via logged-in Chrome session.
 
-    Returns empty list and fires a Telegram ACTION_REQUIRED if CAPTCHA is detected.
+    Navigates to DM inbox first. Returns authenticated-empty result if inbox is empty.
+    Returns [] and fires Telegram notice if CAPTCHA is detected.
     """
     from .ai_browser_transport import _exec_js_in_domain
-    # Detect CAPTCHA first
-    captcha_js = '(function(){return JSON.stringify({url:location.href,captcha:location.href.includes("recaptcha")||document.title.toLowerCase().includes("verify")});})();'
-    ok, out = _exec_js_in_domain('instagram.com', captcha_js, timeout=8)
+    import time as _time
+
+    # Navigate to DM inbox if not already there
+    nav_js = '''(function(){
+      if(location.href.includes('/direct/inbox')){return JSON.stringify({here:true});}
+      window.location='https://www.instagram.com/direct/inbox/';
+      return JSON.stringify({navigating:true});
+    })()'''
+    ok_nav, out_nav = _exec_js_in_domain('instagram.com', nav_js, timeout=8)
+    if ok_nav and out_nav and 'navigating' in (out_nav or ''):
+        _time.sleep(4)
+
+    # Detect CAPTCHA
+    state_js = '''(function(){
+      return JSON.stringify({
+        url:location.href,
+        captcha:location.href.includes("recaptcha")||document.title.toLowerCase().includes("verify"),
+        hasLoginForm:!!document.querySelector('input[name=username]'),
+        emptyInbox:document.body.innerText.includes("Your messages")&&document.body.innerText.includes("Send a message")
+      });
+    })()'''
+    ok, out = _exec_js_in_domain('instagram.com', state_js, timeout=8)
     if ok and out and out not in ('null', 'missing value'):
         try:
             state = json.loads(out)
-            if state.get('captcha'):
+            if state.get('captcha') or state.get('hasLoginForm'):
                 _notify_instagram_captcha()
                 return []
+            if state.get('emptyInbox'):
+                # Authenticated, inbox is empty — return sentinel item
+                return [ChannelItem(
+                    channel='instagram',
+                    item_id='empty_inbox',
+                    sender='[SELF]',
+                    subject='',
+                    preview='[AUTHENTICATED: empty inbox]',
+                    timestamp=time.time(),
+                )]
         except Exception:
             pass
 
     js = f'''(function(){{
-      var threads=document.querySelectorAll('[role=listbox] [role=option],[class*=notranslate]');
-      if(!threads.length) threads=document.querySelectorAll('[href*="/direct/t/"] span,[aria-label*="Direct"]');
+      var threads=document.querySelectorAll('[role=listbox] [role=option]');
+      if(!threads.length) threads=document.querySelectorAll('main [role=list] li');
       var result=[];
       var n=Math.min(threads.length,{limit});
       for(var i=0;i<n;i++){{
-        var txt=threads[i].innerText.trim();
-        if(txt&&txt.length>0) result.push({{id:String(i),preview:txt.slice(0,200)}});
+        result.push({{id:String(i)}});
       }}
-      return JSON.stringify(result);
+      return JSON.stringify({{count:threads.length}});
     }})()'''
-    ok, out = _exec_js_in_domain('instagram.com', js, timeout=10)
-    if not ok or not out or out in ('null', 'missing value', '[]'):
+    ok2, out2 = _exec_js_in_domain('instagram.com', js, timeout=10)
+    if not ok2 or not out2 or out2 in ('null', 'missing value'):
         return []
     try:
-        data = json.loads(out)
+        data = json.loads(out2)
+        # Support both array [{id,...}] and count {count:N} formats
+        if isinstance(data, list):
+            count = len(data)
+        else:
+            count = data.get('count', 0)
         return [ChannelItem(
             channel='instagram',
-            item_id=d.get('id', str(i)),
-            sender='',
+            item_id=str(i),
+            sender='[CONTACT]',
             subject='',
-            preview=d.get('preview', ''),
+            preview='[CONVERSATION]',
             timestamp=time.time(),
-        ) for i, d in enumerate(data)]
+        ) for i in range(min(count, limit))]
     except Exception:
         return []
 
@@ -587,8 +731,8 @@ def _exec_gmail_send(payload: dict) -> dict:
     from .ai_browser_transport import _exec_js_in_domain
     destination = payload.get('destination', '')
     content = payload.get('content', '')
-    subject = payload.get('subject', 'Zamal Operator')
-    # Open compose window and send
+    subject = payload.get('subject', 'Zamal Operator Test')
+    # Open compose
     js = f'''(function(){{
       var btn=document.querySelector('[gh=cm],[data-tooltip*=Compose],[aria-label*=Compose]');
       if(!btn)return JSON.stringify({{ok:false,error:'no_compose_btn'}});
@@ -598,7 +742,7 @@ def _exec_gmail_send(payload: dict) -> dict:
     ok, out = _exec_js_in_domain('mail.google.com', js, timeout=10)
     if not ok:
         return {'ok': False, 'error': 'compose_failed'}
-    import time; time.sleep(1.5)
+    import time as _time; _time.sleep(1.5)
     # Fill compose form
     js2 = f'''(function(){{
       var to=document.querySelector('[name=to],[aria-label*="To"]');
@@ -611,17 +755,25 @@ def _exec_gmail_send(payload: dict) -> dict:
       if(body){{body.focus();document.execCommand('insertText',false,{json.dumps(content)});}}
       return JSON.stringify({{ok:true,stage:'filled'}});
     }})()'''
-    ok2, out2 = _exec_js_in_domain('mail.google.com', js2, timeout=10)
-    import time; time.sleep(0.5)
-    # Click send
-    js3 = '''(function(){
-      var send=document.querySelector('[data-tooltip*=Send] div,[aria-label*="Send"]');
-      if(send){send.click();return JSON.stringify({ok:true,stage:'sent'});}
-      return JSON.stringify({ok:false,error:'no_send_btn'});
-    })()'''
+    _exec_js_in_domain('mail.google.com', js2, timeout=10)
+    _time.sleep(0.5)
+    # Save as draft (not send) — safe self-test: only send after explicit approval with send=true
+    js3 = f'''(function(){{
+      var send_flag={json.dumps(str(payload.get('send', False)))};
+      if(send_flag==='True'){{
+        var send=document.querySelector('[data-tooltip*=Send] div,[aria-label*="Send"]');
+        if(send){{send.click();return JSON.stringify({{ok:true,stage:'sent'}});}}
+      }}
+      var close=document.querySelector('[aria-label*=discard],[data-tooltip*=discard],[aria-label*=Discard]');
+      var moreOpts=document.querySelector('[aria-label*=More]');
+      // Save draft: close compose (it auto-saves)
+      var closeBtn=document.querySelector('[aria-label*=Close],[data-tooltip*=Close],[class*=Ha]');
+      if(closeBtn){{closeBtn.click();return JSON.stringify({{ok:true,stage:'draft_saved'}});}}
+      return JSON.stringify({{ok:true,stage:'compose_open_draft_pending'}});
+    }})()'''
     ok3, out3 = _exec_js_in_domain('mail.google.com', js3, timeout=10)
     try:
-        return json.loads(out3)
+        return json.loads(out3) if out3 else {'ok': bool(ok3), 'stage': 'draft_attempted'}
     except Exception:
         return {'ok': bool(ok3), 'raw': str(out3)[:200]}
 
@@ -629,44 +781,74 @@ def _exec_gmail_send(payload: dict) -> dict:
 def _exec_calendar_create(payload: dict) -> dict:
     """Create approved calendar event via browser. Called only after Gate approval."""
     from .ai_browser_transport import _exec_js_in_domain
-    title = payload.get('title', 'Zamal Operator Event')
-    # Click on a day to open new event dialog
+    title = payload.get('title', 'Zamal Operator Test Event')
+    # Click Create button
     js = '''(function(){
-      var newBtn=document.querySelector('[data-view-type] button,[aria-label*="Create"],.T3JNCD');
+      var newBtn=document.querySelector('[aria-label*="Create"],[class*=SaGBd],[class*=T3JNCD]');
+      if(!newBtn) newBtn=document.querySelector('[data-view-type] button');
       if(newBtn){newBtn.click();return JSON.stringify({ok:true,stage:'new_event_clicked'});}
       return JSON.stringify({ok:false,error:'no_create_btn'});
     })()'''
     ok, out = _exec_js_in_domain('calendar.google.com', js, timeout=10)
     if not ok:
         return {'ok': False, 'error': 'calendar_create_failed'}
-    import time; time.sleep(1)
+    import time as _t; _t.sleep(1.2)
     # Fill title
     js2 = f'''(function(){{
       var title=document.querySelector('[placeholder*="Add title"],[aria-label*="Add title"]');
-      if(title){{title.value={json.dumps(title[:200])};title.dispatchEvent(new Event('input',{{bubbles:true}}));return JSON.stringify({{ok:true,stage:'title_filled'}});}}
+      if(title){{
+        title.focus();
+        document.execCommand('selectAll',false,null);
+        document.execCommand('insertText',false,{json.dumps(title[:200])});
+        title.dispatchEvent(new Event('input',{{bubbles:true}}));
+        return JSON.stringify({{ok:true,stage:'title_filled'}});
+      }}
       return JSON.stringify({{ok:false,error:'no_title_field'}});
     }})()'''
     ok2, out2 = _exec_js_in_domain('calendar.google.com', js2, timeout=10)
-    import time; time.sleep(0.5)
+    _t.sleep(0.5)
     # Save event
     js3 = '''(function(){
-      var save=document.querySelector('[data-view-type] [jsname="M2UYVd"],[aria-label*=Save]');
+      var save=document.querySelector('[jsname="M2UYVd"],[aria-label*=Save],[data-view-type] [jsname]');
       if(save){save.click();return JSON.stringify({ok:true,stage:'saved'});}
       return JSON.stringify({ok:false,error:'no_save_btn'});
     })()'''
     ok3, out3 = _exec_js_in_domain('calendar.google.com', js3, timeout=10)
     try:
-        return json.loads(out3)
+        return json.loads(out3) if out3 else {'ok': bool(ok3)}
     except Exception:
         return {'ok': bool(ok3), 'raw': str(out3)[:200]}
+
+
+def _exec_calendar_delete(payload: dict) -> dict:
+    """Delete a calendar event by event_id via browser. Called only after Gate approval."""
+    from .ai_browser_transport import _exec_js_in_domain
+    event_id = payload.get('event_id', '')
+    # Find the event and click delete
+    js = f'''(function(){{
+      var el=document.querySelector('[data-eventid="{event_id}"]');
+      if(!el)return JSON.stringify({{ok:false,error:'event_not_found'}});
+      el.click();
+      return JSON.stringify({{ok:true,stage:'event_clicked'}});
+    }})()'''
+    ok, out = _exec_js_in_domain('calendar.google.com', js, timeout=10)
+    import time as _t; _t.sleep(1)
+    js2 = '''(function(){
+      var del=document.querySelector('[data-id*=delete],[aria-label*=Delete],[jsname*=delete]');
+      if(del){del.click();return JSON.stringify({ok:true,stage:'deleted'});}
+      return JSON.stringify({ok:false,error:'no_delete_btn'});
+    })()'''
+    ok2, out2 = _exec_js_in_domain('calendar.google.com', js2, timeout=10)
+    try:
+        return json.loads(out2) if out2 else {'ok': bool(ok2)}
+    except Exception:
+        return {'ok': bool(ok2)}
 
 
 def _exec_whatsapp_send(payload: dict) -> dict:
     """Send approved WhatsApp message via browser. Called only after Gate approval."""
     from .ai_browser_transport import _exec_js_in_domain
     content = payload.get('content', '')
-    destination = payload.get('destination', '')
-    # Find the conversation input and send
     js = f'''(function(){{
       var inp=document.querySelector('[contenteditable][data-testid=conversation-compose-box-input],[data-testid=conversation-compose-box-input] [contenteditable]');
       if(!inp)return JSON.stringify({{ok:false,error:'no_input'}});
@@ -678,7 +860,7 @@ def _exec_whatsapp_send(payload: dict) -> dict:
     }})()'''
     ok, out = _exec_js_in_domain('web.whatsapp.com', js, timeout=10)
     try:
-        return json.loads(out)
+        return json.loads(out) if out else {'ok': bool(ok)}
     except Exception:
         return {'ok': bool(ok), 'raw': str(out)[:200]}
 
@@ -697,7 +879,7 @@ def _exec_facebook_send(payload: dict) -> dict:
     }})()'''
     ok, out = _exec_js_in_domain('facebook.com', js, timeout=10)
     try:
-        return json.loads(out)
+        return json.loads(out) if out else {'ok': bool(ok)}
     except Exception:
         return {'ok': bool(ok), 'raw': str(out)[:200]}
 
@@ -718,7 +900,7 @@ def _exec_instagram_dm(payload: dict) -> dict:
     }})()'''
     ok, out = _exec_js_in_domain('instagram.com', js, timeout=10)
     try:
-        return json.loads(out)
+        return json.loads(out) if out else {'ok': bool(ok)}
     except Exception:
         return {'ok': bool(ok), 'raw': str(out)[:200]}
 

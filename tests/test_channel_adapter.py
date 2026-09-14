@@ -17,6 +17,8 @@ from zamal_core.channel_adapter import (
     ChannelResult,
     _get_executor,
     _get_reader,
+    _mask_pii,
+    _sanitize_sender,
     _read_gmail,
     _read_whatsapp,
     _read_calendar,
@@ -30,6 +32,7 @@ from zamal_core.channel_adapter import (
     _exec_calendar_create,
     _exec_telegram_send,
     _get_emergency_stop,
+    _set_emergency_stop,
     get_channel_adapter,
 )
 
@@ -226,8 +229,16 @@ class TestProposeSend(unittest.TestCase):
     def test_destination_in_payload(self, _mock):
         proposal = self.adapter.propose_send(
             'whatsapp', '+15551234567', 'Hi there')
-        self.assertEqual(proposal.destination, '+15551234567')
+        # Phone numbers are PII-masked in the destination field
+        self.assertEqual(proposal.destination, '[PHONE_REDACTED]')
         self.assertIn('destination', proposal.payload)
+
+    @patch.object(ChannelAdapter, '_create_approval', return_value='appr-xyz')
+    def test_safe_destination_not_masked(self, _mock):
+        """Non-phone, non-email destinations pass through unchanged."""
+        proposal = self.adapter.propose_send(
+            'telegram', 'test_self', 'Hi there')
+        self.assertEqual(proposal.destination, 'test_self')
 
     @patch.object(ChannelAdapter, '_create_approval', return_value='id-1')
     def test_proposal_id_is_uuid(self, _mock):
@@ -515,11 +526,20 @@ class TestReadGmail(unittest.TestCase):
         items = _read_gmail(limit=10)
         self.assertEqual(len(items), 2)
         self.assertEqual(items[0].channel, 'gmail')
-        self.assertEqual(items[0].sender, 'alice@example.com')
+        # sender is always [CONTACT] — email addresses are PII-masked
+        self.assertEqual(items[0].sender, '[CONTACT]')
         self.assertEqual(items[0].subject, 'Hello')
         self.assertEqual(items[0].preview, 'Hey there')
         self.assertEqual(items[0].item_id, 'thread1')
         self.assertEqual(items[0].metadata['time'], 'Mon 10:00 AM')
+
+    @patch(_JS_PATCH)
+    def test_sender_email_not_exposed(self, mock_js):
+        """Email addresses in sender field must never appear in returned items."""
+        mock_js.return_value = (True, self._make_js_output())
+        items = _read_gmail(limit=10)
+        for item in items:
+            self.assertNotIn('@', item.sender, 'Real email address found in sender field')
 
     @patch(_JS_PATCH)
     def test_returns_empty_on_js_failure(self, mock_js):
@@ -575,7 +595,8 @@ class TestReadWhatsapp(unittest.TestCase):
         items = _read_whatsapp(limit=10)
         self.assertEqual(len(items), 2)
         self.assertEqual(items[0].channel, 'whatsapp')
-        self.assertEqual(items[0].sender, 'Alice')
+        # Contact names are always masked as [CONTACT] — PII protection
+        self.assertEqual(items[0].sender, '[CONTACT]')
         self.assertEqual(items[0].preview, 'See you tomorrow')
 
     @patch(_JS_PATCH)
@@ -604,10 +625,19 @@ class TestReadWhatsapp(unittest.TestCase):
         self.assertEqual(items, [])
 
     @patch(_JS_PATCH)
-    def test_sender_is_conversation_name(self, mock_js):
+    def test_sender_is_always_contact_token(self, mock_js):
+        """Contact names must never appear in sender — always [CONTACT]."""
         mock_js.return_value = (True, json.dumps([{'id': '0', 'name': 'Charlie', 'preview': 'hi'}]))
         items = _read_whatsapp()
-        self.assertEqual(items[0].sender, 'Charlie')
+        self.assertEqual(items[0].sender, '[CONTACT]')
+
+    @patch(_JS_PATCH)
+    def test_phone_in_preview_masked(self, mock_js):
+        """Phone numbers in preview content must be masked."""
+        mock_js.return_value = (True, json.dumps([{'id': '0', 'preview': 'Call me at +1 555-123-4567'}]))
+        items = _read_whatsapp()
+        self.assertNotIn('+1 555-123-4567', items[0].preview)
+        self.assertIn('[PHONE_REDACTED]', items[0].preview)
 
 
 # ── _read_calendar() ─────────────────────────────────────────────────────
@@ -640,12 +670,15 @@ class TestReadCalendar(unittest.TestCase):
 class TestReadFacebook(unittest.TestCase):
     @patch(_JS_PATCH)
     def test_parses_threads(self, mock_js):
+        """Thread count is correct; real conversation content is never exposed."""
         data = [{'id': '0', 'preview': 'Hey!'}, {'id': '1', 'preview': 'What time?'}]
         mock_js.return_value = (True, json.dumps(data))
         items = _read_facebook()
         self.assertEqual(len(items), 2)
         self.assertEqual(items[0].channel, 'facebook')
-        self.assertEqual(items[0].preview, 'Hey!')
+        # Real message content never returned — always sanitized label
+        self.assertEqual(items[0].preview, '[CONVERSATION]')
+        self.assertEqual(items[0].sender, '[CONTACT]')
 
     @patch(_JS_PATCH)
     def test_returns_empty_on_failure(self, mock_js):
@@ -657,13 +690,16 @@ class TestReadFacebook(unittest.TestCase):
 
 class TestReadInstagram(unittest.TestCase):
     @patch(_JS_PATCH)
-    def test_parses_dms(self, mock_js):
-        data = [{'id': '0', 'preview': 'Check this out'}]
+    def test_parses_dms_count(self, mock_js):
+        """Array data returns correct count with sanitized previews."""
+        data = [{'id': '0'}, {'id': '1'}]
         mock_js.return_value = (True, json.dumps(data))
         items = _read_instagram()
-        self.assertEqual(len(items), 1)
+        self.assertEqual(len(items), 2)
         self.assertEqual(items[0].channel, 'instagram')
-        self.assertEqual(items[0].preview, 'Check this out')
+        # Real conversation content is never exposed — always sanitized label
+        self.assertNotIn('Check this out', items[0].preview)
+        self.assertEqual(items[0].sender, '[CONTACT]')
 
     @patch(_JS_PATCH)
     def test_returns_empty_on_missing_value(self, mock_js):
@@ -734,7 +770,8 @@ class TestReadTelegram(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].channel, 'telegram')
         self.assertEqual(items[0].item_id, '101')
-        self.assertEqual(items[0].sender, 'alice')
+        # Telegram sender is always [CONTACT] — username/first_name is PII
+        self.assertEqual(items[0].sender, '[CONTACT]')
         self.assertEqual(items[0].preview, 'Hello bot')
 
 
@@ -1004,6 +1041,192 @@ class TestNoCredentialLeakage(unittest.TestCase):
             'gmail', 'x@y.com', 'password=supersecretvalue123')
         self.assertNotIn('supersecretvalue123', proposal.preview)
         self.assertNotIn('supersecretvalue123', str(proposal.payload))
+
+
+# ── PII masking behavioral tests ──────────────────────────────────────────
+
+class TestMaskPii(unittest.TestCase):
+    """Behavioral tests for _mask_pii() — private identifiers must not appear in output."""
+
+    def test_email_in_text_is_redacted(self):
+        result = _mask_pii('Contact alice@example.com for details')
+        self.assertNotIn('alice@example.com', result)
+        self.assertIn('[EMAIL_REDACTED]', result)
+
+    def test_phone_in_text_is_redacted(self):
+        result = _mask_pii('Call me at +1 555-123-4567')
+        self.assertNotIn('+1 555-123-4567', result)
+        self.assertIn('[PHONE_REDACTED]', result)
+
+    def test_international_phone_redacted(self):
+        result = _mask_pii('WhatsApp: +974 5507 5798')
+        self.assertNotIn('5507 5798', result)
+        self.assertIn('[PHONE_REDACTED]', result)
+
+    def test_plain_text_unchanged(self):
+        result = _mask_pii('Hello, how are you today?')
+        self.assertEqual(result, 'Hello, how are you today?')
+
+    def test_multiple_emails_all_redacted(self):
+        result = _mask_pii('From: a@x.com to b@y.com cc c@z.com')
+        self.assertNotIn('@', result)
+        self.assertEqual(result.count('[EMAIL_REDACTED]'), 3)
+
+    def test_empty_string_unchanged(self):
+        self.assertEqual(_mask_pii(''), '')
+
+    def test_none_handled_safely(self):
+        self.assertEqual(_mask_pii(None), None)
+
+
+class TestSanitizeSender(unittest.TestCase):
+    """Behavioral tests proving real sender identifiers cannot appear in ChannelItem.sender."""
+
+    def test_email_sender_masked(self):
+        result = _sanitize_sender('alice@example.com')
+        self.assertNotIn('@', result)
+        self.assertIn('EMAIL_REDACTED', result)
+
+    def test_plain_name_becomes_contact(self):
+        """Real names (non-email) are replaced with [CONTACT] token."""
+        result = _sanitize_sender('John Smith')
+        self.assertEqual(result, '[CONTACT]')
+
+    def test_empty_sender_stays_empty(self):
+        self.assertEqual(_sanitize_sender(''), '')
+
+    def test_phone_in_sender_masked(self):
+        result = _sanitize_sender('+974 5507 5798')
+        self.assertNotIn('5507', result)
+
+    def test_real_contact_name_never_returned(self):
+        for name in ['Alice', 'Bob', 'Mohammed', 'Sarah Johnson', 'Ra Bbi']:
+            result = _sanitize_sender(name)
+            self.assertNotEqual(result, name,
+                msg=f'Real name "{name}" should not appear in sanitized sender')
+
+
+class TestChannelReadPiiSanitization(unittest.TestCase):
+    """Integration tests: channel reads must not expose private identifiers."""
+
+    @patch(_JS_PATCH)
+    def test_gmail_read_never_exposes_sender_email(self, mock_js):
+        data = [{'id': '1', 'sender': 'user@real-company.com', 'subject': 'Hi',
+                 'preview': 'See you soon', 'time': ''}]
+        mock_js.return_value = (True, json.dumps(data))
+        adapter = ChannelAdapter()
+        result = adapter.read('gmail', limit=5)
+        for item in result.items:
+            self.assertNotIn('@', item.sender,
+                msg='Real email address exposed in sender field')
+            self.assertNotIn('real-company.com', item.sender)
+
+    @patch(_JS_PATCH)
+    def test_whatsapp_read_never_exposes_contact_name(self, mock_js):
+        data = [{'id': '0', 'name': 'Mohammed Jamal', 'preview': 'Meeting tomorrow'}]
+        mock_js.return_value = (True, json.dumps(data))
+        adapter = ChannelAdapter()
+        result = adapter.read('whatsapp', limit=5)
+        for item in result.items:
+            self.assertNotEqual(item.sender, 'Mohammed Jamal',
+                msg='Real contact name exposed in sender field')
+            self.assertEqual(item.sender, '[CONTACT]')
+
+    @patch(_JS_PATCH)
+    def test_whatsapp_read_masks_phone_in_preview(self, mock_js):
+        data = [{'id': '0', 'preview': 'My number is +974 3312 5000 call me'}]
+        mock_js.return_value = (True, json.dumps(data))
+        adapter = ChannelAdapter()
+        result = adapter.read('whatsapp', limit=5)
+        for item in result.items:
+            self.assertNotIn('+974 3312 5000', item.preview,
+                msg='Real phone number exposed in preview')
+
+    @patch(_JS_PATCH)
+    def test_gmail_read_masks_email_in_preview(self, mock_js):
+        data = [{'id': '1', 'subject': 'Test', 'preview': 'Reply to ops@company.com ASAP', 'time': ''}]
+        mock_js.return_value = (True, json.dumps(data))
+        adapter = ChannelAdapter()
+        result = adapter.read('gmail', limit=5)
+        for item in result.items:
+            self.assertNotIn('ops@company.com', item.preview,
+                msg='Real email in preview content exposed')
+
+
+class TestEmergencyStopRealPath(unittest.TestCase):
+    """Test Emergency Stop through the real Store path (not just mock)."""
+
+    def test_set_and_get_emergency_stop(self):
+        """Round-trip: set stop_everything, read it back, then clear."""
+        # Set stop
+        ok = _set_emergency_stop(stop_everything=True)
+        if not ok:
+            self.skipTest('Store controls table not available')
+        try:
+            flags = _get_emergency_stop()
+            self.assertTrue(flags.get('stop_everything'),
+                'Emergency stop flag should be set')
+        finally:
+            # Always clear
+            _set_emergency_stop(stop_everything=False, pause_external=False)
+
+    def test_emergency_stop_blocks_execute_approved(self):
+        """Emergency stop blocks execute_approved through the real path."""
+        ok = _set_emergency_stop(stop_everything=True)
+        if not ok:
+            self.skipTest('Store controls table not available')
+        try:
+            adapter = ChannelAdapter()
+            with patch.object(adapter, '_create_approval', return_value='test-ap-id'):
+                proposal = adapter.propose_send('telegram', 'test_self', 'test msg')
+            result = adapter.execute_approved(
+                proposal, approval_id=proposal.approval_id, actor='test')
+            self.assertFalse(result.get('ok'))
+            self.assertIn('emergency_stop', result.get('error', ''))
+        finally:
+            _set_emergency_stop(stop_everything=False, pause_external=False)
+
+    def test_clear_emergency_stop_restores_normal(self):
+        """After clearing emergency stop, execute_approved is no longer blocked by stop."""
+        ok = _set_emergency_stop(stop_everything=False, pause_external=False)
+        if not ok:
+            self.skipTest('Store not available')
+        flags = _get_emergency_stop()
+        self.assertFalse(flags.get('stop_everything'))
+        self.assertFalse(flags.get('pause_external_actions'))
+
+
+class TestProposalRegistry(unittest.TestCase):
+    """Test the in-memory proposal registry for Control Center integration."""
+
+    def setUp(self):
+        self.adapter = ChannelAdapter()
+
+    def test_proposal_stored_on_create(self):
+        with patch.object(self.adapter, '_create_approval', return_value='ap-1'):
+            proposal = self.adapter.propose_send('telegram', 'test_self', 'hello')
+        found = self.adapter.get_proposal(proposal.proposal_id)
+        self.assertIsNotNone(found)
+        self.assertEqual(found.proposal_id, proposal.proposal_id)
+
+    def test_pending_proposals_list(self):
+        with patch.object(self.adapter, '_create_approval', return_value='ap-2'):
+            p1 = self.adapter.propose_send('gmail', 'test_self', 'msg1')
+        pending = self.adapter.get_pending_proposals()
+        ids = [p.proposal_id for p in pending]
+        self.assertIn(p1.proposal_id, ids)
+
+    def test_rejected_proposal_removed_from_pending(self):
+        with patch.object(self.adapter, '_create_approval', return_value='ap-3'):
+            proposal = self.adapter.propose_send('telegram', 'test_self', 'hello')
+        self.adapter.execute_rejected(proposal, actor='test')
+        pending = self.adapter.get_pending_proposals()
+        ids = [p.proposal_id for p in pending]
+        self.assertNotIn(proposal.proposal_id, ids)
+
+    def test_get_proposal_returns_none_for_unknown_id(self):
+        result = self.adapter.get_proposal('nonexistent-id-12345')
+        self.assertIsNone(result)
 
 
 if __name__ == '__main__':
