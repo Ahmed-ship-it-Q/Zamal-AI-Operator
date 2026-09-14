@@ -1067,9 +1067,16 @@ def _exec_gmail_send(payload: dict) -> dict:
     except Exception:
         return {'ok': False, 'error': 'body_parse_error', 'raw': str(out4)[:100]}
 
-    # Step 5: Click Send button inside the compose dialog
+    # Step 5: Click Send button — must find the visible dialog, not the first (invisible) one.
+    # document.querySelector('[role=dialog]') returns the first dialog which is invisible (w=0);
+    # iterate to find the visible compose dialog before searching for the Send button.
     js_send = '''(function(){
-      var dialog = document.querySelector('[role=dialog]');
+      var dialog = null;
+      var allDialogs = Array.from(document.querySelectorAll('[role=dialog]'));
+      for(var i=0;i<allDialogs.length;i++){
+        var r=allDialogs[i].getBoundingClientRect();
+        if(r.width>0 && r.height>0){ dialog=allDialogs[i]; break; }
+      }
       var btns = Array.from((dialog||document).querySelectorAll('div[role=button],button'));
       var sendBtn = null;
       for(var b of btns){
@@ -1080,17 +1087,18 @@ def _exec_gmail_send(payload: dict) -> dict:
           sendBtn = b; break;
         }
       }
-      if(!sendBtn) return JSON.stringify({ok:false,error:'no_send_btn'});
+      if(!sendBtn) return JSON.stringify({ok:false,error:'no_send_btn',dialog_found:!!dialog});
       sendBtn.click();
       return JSON.stringify({ok:true,stage:'send_clicked'});
     })()'''
     ok5, out5 = _exec_js_in_domain('mail.google.com', js_send, timeout=10)
     _time.sleep(3.0)  # wait for compose to close after send
 
-    # Step 6: Verify compose dialog is closed
+    # Step 6: Verify compose dialog is closed (check for visible dialog, not just any dialog)
     js_verify = '''(function(){
-      var dialog = document.querySelector('[role=dialog]');
-      var composeClosed = !dialog || dialog.getBoundingClientRect().width === 0;
+      var allDialogs = Array.from(document.querySelectorAll('[role=dialog]'));
+      var hasVisible = allDialogs.some(function(d){ var r=d.getBoundingClientRect(); return r.width>0&&r.height>0; });
+      var composeClosed = !hasVisible;
       return JSON.stringify({ok:composeClosed, composeClosed:composeClosed, url:location.href.slice(0,80)});
     })()'''
     ok6, out6 = _exec_js_in_domain('mail.google.com', js_verify, timeout=8)
