@@ -1989,7 +1989,30 @@ class _Handler(BaseHTTPRequestHandler):
             task_id = task['id']
             _advance_task_to_waiting_approval(store, task_id)
             store.close()
-            if n8n_status != 'ok':
+            n8n_exec_id = None
+            if n8n_status == 'ok':
+                # Forward sanitized lead to n8n webhook (no raw PII)
+                try:
+                    wh_payload = json.dumps({
+                        'source': 'website_form',
+                        'email_masked': masked_email,
+                        'subject': safe_subject[:80],
+                        'classification': 'website_form_draft',
+                        'task_type': 'website_form',
+                        'task_id': task_id,
+                        'privacy_level': 'SANITIZED',
+                    }).encode()
+                    wh_req = urllib.request.Request(
+                        'http://127.0.0.1:5678/webhook/zamal-lead',
+                        data=wh_payload,
+                        headers={'Content-Type': 'application/json'},
+                    )
+                    with urllib.request.urlopen(wh_req, timeout=5) as wh_resp:
+                        wh_data = json.loads(wh_resp.read(4096))
+                        n8n_exec_id = wh_data.get('task_id') or wh_data.get('exec_id')
+                except Exception:
+                    pass  # n8n webhook failure is non-fatal
+            else:
                 threading.Thread(
                     target=_send_telegram_notify,
                     args=(task_id,
@@ -2000,6 +2023,7 @@ class _Handler(BaseHTTPRequestHandler):
                 'ok': True, 'duplicate': False,
                 'task_id': task_id, 'state': 'WAITING_APPROVAL',
                 'masked_from': masked_email, 'n8n_status': n8n_status,
+                'n8n_exec_id': n8n_exec_id,
             }, 201)
         except Exception as exc:
             self._error(500, str(exc))

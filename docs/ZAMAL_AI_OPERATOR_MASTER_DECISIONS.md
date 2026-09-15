@@ -288,8 +288,17 @@ Status values from the API (`ok`, `configured`, `partial`, `unconfigured`, `unre
 
 The Emergency Stop badge in the topbar shows **STOP ACTIVE** (red) or **CLEAR** (green) in real time. The `/api/status` response includes `emergency_stop_active: bool`.
 
+### AI Provider Initial Status (Live Closure Fix)
+
+Browser-based AI providers (ChatGPT, Claude, Gemini, DeepSeek, Qwen, Kimi) start as `SESSION_REQUIRED` on macOS (not `UNAVAILABLE`). `UNAVAILABLE` is reserved for providers where Chrome is not running or the tab cannot be opened. `SESSION_REQUIRED` correctly indicates a browser session is needed but Chrome is reachable.
+
+### n8n Webhook Integration (Live Closure Fix)
+
+`POST /api/website-form` now forwards a sanitized lead payload to `http://127.0.0.1:5678/webhook/zamal-lead` when n8n is reachable. Raw PII is never forwarded — only `email_masked`, `subject[:80]`, `classification`, `task_type`, `task_id`, `privacy_level`. The webhook response `exec_id` is returned in the API response as `n8n_exec_id`. Webhook failure is non-fatal; task is already at WAITING_APPROVAL before the webhook call.
+
 ### Test Counts
 
 | Phase | Tests Added | Cumulative |
 |-------|------------|-----------|
 | Step 3C | 44 | 1325 |
+| Step 3C live closure | 0 (code fixes, no new tests) | 1325 |

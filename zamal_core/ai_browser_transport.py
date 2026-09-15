@@ -428,7 +428,7 @@ class BrowserAITransport:
 
     def __init__(self):
         self._health: dict = {
-            k: ProviderHealth(k, 'NOT_CONFIGURED' if not _IS_DARWIN else 'UNAVAILABLE')
+            k: ProviderHealth(k, 'NOT_CONFIGURED' if not _IS_DARWIN else 'SESSION_REQUIRED')
             for k in PROVIDER_CONFIGS
         }
         self._lock = threading.Lock()
