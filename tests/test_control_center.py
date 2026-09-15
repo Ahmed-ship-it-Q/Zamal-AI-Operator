@@ -84,7 +84,7 @@ class TestControlCenterServer(unittest.TestCase):
         expected_keys = {'codex', 'claude', 'gemini', 'chatgpt_web',
                          'browser', 'n8n', 'telegram', 'github', 'cpc',
                          'ch_gmail', 'ch_calendar', 'ch_whatsapp', 'ch_facebook',
-                         'ch_messenger', 'ch_instagram'}
+                         'ch_messenger', 'ch_instagram', 'ch_telegram'}
         self.assertEqual(set(conn.keys()), expected_keys)
 
     def test_04_tasks_returns_list(self):
@@ -254,7 +254,7 @@ class TestConnectionStatusValues(unittest.TestCase):
         expected = {'codex', 'claude', 'gemini', 'chatgpt_web',
                     'browser', 'n8n', 'telegram', 'github', 'cpc',
                     'ch_gmail', 'ch_calendar', 'ch_whatsapp', 'ch_facebook',
-                    'ch_messenger', 'ch_instagram'}
+                    'ch_messenger', 'ch_instagram', 'ch_telegram'}
         self.assertEqual(set(statuses.keys()), expected)
 
 

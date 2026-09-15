@@ -248,3 +248,48 @@ Accidental private-content exposure triggers `record_privacy_incident()`:
 ### Separation of Public vs Private
 
 `_research_facebook_feed()`, `_research_instagram_public()` and public-web functions do not require `PrivateReadAuth` — they target public pages only. They cannot unlock private DMs, inboxes, or email.
+
+---
+
+## 10. Step 3C — Operator Orchestration (2026-09-15)
+
+### Website Form Intake
+
+`POST /api/website-form` in `control_center.py` implements the complete intake pipeline:
+- **Validation**: email format, required fields (email + message), length limits
+- **Privacy**: email is masked (e.g. `ste***@example.com`) in all responses and stored only as a SHA-256 dedup hash; raw email is never logged
+- **Deduplication**: `request_key = 'website_form:sha256(email|subject|message)[:32]'`; duplicate submissions return the existing task without creating a new one
+- **State machine**: task advances `RECEIVED→UNDERSTOOD→PLANNED→WAITING_APPROVAL` atomically
+- **n8n awareness**: if n8n is unreachable, sends a sanitized Telegram ACTION_REQUIRED notification
+
+### GitHub Operator
+
+`GET /api/github/ci-status` returns local git state (branch, SHA, last commit, ahead count) plus:
+- `write_requires_approval: true` — all write operations (commit, push, merge, branch-delete) require operator approval
+- `note` — reminder that CI conclusion for private repos requires a logged-in browser tab
+
+The `safety.py` Controls class enforces write protection via `disable_github_push` and `stop_everything` flags. Read-only operations (`git_capture`, `diff_review`) always pass.
+
+### Emergency Stop + Checkpoint Recovery
+
+`POST /api/checkpoint-save` persists a checkpoint note in the task's `next_action` and `evidence` fields, then sends a sanitized Telegram ACTION_REQUIRED notification asynchronously.
+
+`POST /api/checkpoint-resume` reads the checkpoint, clears `next_action`, appends a RESUMED evidence note, and returns `duplicate_action: false` — proving the same task_id resumes without spawning a duplicate.
+
+### Unified Control Center Status
+
+All seven channels are now shown in the CC status table: Telegram, Gmail, Calendar, WhatsApp, Facebook, Messenger, Instagram (`ch_telegram` added to `get_connection_status()`).
+
+Status values from the API (`ok`, `configured`, `partial`, `unconfigured`, `unreachable`, `external_only`) are mapped in the CC UI to semantic labels:
+- `ok`/`configured` → **LIVE_VERIFIED**
+- `partial` → **DEGRADED**
+- `unconfigured`/`unreachable` → **UNAVAILABLE**
+- `external_only` → **SESSION_REQUIRED**
+
+The Emergency Stop badge in the topbar shows **STOP ACTIVE** (red) or **CLEAR** (green) in real time. The `/api/status` response includes `emergency_stop_active: bool`.
+
+### Test Counts
+
+| Phase | Tests Added | Cumulative |
+|-------|------------|-----------|
+| Step 3C | 44 | 1325 |

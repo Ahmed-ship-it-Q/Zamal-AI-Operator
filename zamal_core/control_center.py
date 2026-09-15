@@ -335,6 +335,7 @@ def get_connection_status():
         'ch_facebook': _check_channel('facebook'),
         'ch_messenger': _check_channel('messenger'),
         'ch_instagram': _check_channel('instagram'),
+        'ch_telegram': _check_channel('telegram'),
     }
     # Safety assertion — all values must be valid
     for k, v in statuses.items():
@@ -608,6 +609,49 @@ def _maybe_send_telegram(task_id, analysis):
         pass  # Telegram is best-effort
 
 
+def _send_telegram_notify(task_id: str, message: str):
+    """Best-effort sanitized Telegram notification for action-required events."""
+    try:
+        _load_auth_env()
+        from .telegram_bot import TelegramConfig, TelegramAPI
+        tc = TelegramConfig()
+        if not tc.configured:
+            return
+        api = TelegramAPI(tc)
+        safe_msg = _sanitize(message)[:400]
+        for cid in tc._allowed:
+            try:
+                api.send_message(cid, f'\u26a1 ZAMAL ACTION_REQUIRED\ntask: {task_id[:8]}\n{safe_msg}')
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _advance_task_to_waiting_approval(store, task_id):
+    """Advance task RECEIVED\u2192UNDERSTOOD\u2192PLANNED\u2192WAITING_APPROVAL."""
+    from .store import STATES
+    terminal = {'WAITING_APPROVAL', 'COMPLETED', 'REJECTED', 'FAILED'}
+    path = ['UNDERSTOOD', 'PLANNED', 'WAITING_APPROVAL']
+    for _ in range(6):
+        task = store.task(task_id)
+        state = task['state']
+        if state in terminal:
+            break
+        moved = False
+        for target in path:
+            if target in STATES.get(state, set()):
+                try:
+                    with store.transaction():
+                        store._move(task_id, target)
+                    moved = True
+                except Exception:
+                    pass
+                break
+        if not moved:
+            break
+
+
 # ── HTML UI ───────────────────────────────────────────────────────────────────
 
 _HTML_UI = '''<!DOCTYPE html>
@@ -710,6 +754,15 @@ _HTML_UI = '''<!DOCTYPE html>
   #msg-bar.error { background: #c53030; }
   ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-thumb { background: #2d3748; }
   .section-sep { margin: 14px 0; border: none; border-top: 1px solid #2d3748; }
+  .estop-badge { display:inline-block; padding:2px 8px; border-radius:10px;
+                 font-size:11px; font-weight:700; margin-left:8px; }
+  .estop-badge-active { background:#742a2a; color:#fc8181; }
+  .estop-badge-clear  { background:#22543d; color:#9ae6b4; }
+  .sdLIVE_VERIFIED    { color:#9ae6b4; }
+  .sdDEGRADED         { color:#fbd38d; }
+  .sdSESSION_REQUIRED { color:#76e4f7; }
+  .sdUNAVAILABLE      { color:#fc8181; }
+  .sdACTION_REQUIRED  { color:#fc8181; font-weight:700; }
 </style>
 </head>
 <body>
@@ -718,6 +771,7 @@ _HTML_UI = '''<!DOCTYPE html>
   <div id="topbar-right">
     <span id="clock"></span>
     <button id="estop-btn" onclick="emergencyStop()">Emergency Stop</button>
+    <span id="estop-badge" class="estop-badge estop-badge-clear">CLEAR</span>
   </div>
 </div>
 <div id="layout">
@@ -758,6 +812,18 @@ _HTML_UI = '''<!DOCTYPE html>
     <div class="section-title">Pending Proposals</div>
     <div id="proposals-list" style="font-size:12px;color:#718096">Loading...</div>
     <hr class="section-sep">
+    <div class="section-title">Website Form Intake</div>
+    <input id="wf-email" placeholder="Email *" style="background:#1a1d2e;border:1px solid #2d3748;color:#e2e8f0;padding:4px 8px;border-radius:4px;width:100%;box-sizing:border-box;margin-bottom:5px;font-size:12px"/>
+    <input id="wf-subject" placeholder="Subject" style="background:#1a1d2e;border:1px solid #2d3748;color:#e2e8f0;padding:4px 8px;border-radius:4px;width:100%;box-sizing:border-box;margin-bottom:5px;font-size:12px"/>
+    <textarea id="wf-message" placeholder="Message *" style="background:#1a1d2e;border:1px solid #2d3748;color:#e2e8f0;padding:6px 8px;border-radius:4px;width:100%;box-sizing:border-box;height:50px;font-size:12px;resize:vertical;margin-bottom:5px"></textarea>
+    <button class="submit-btn" onclick="submitWebsiteForm()" style="background:#553c9a;font-size:12px">Submit Form</button>
+    <div id="wf-status" style="font-size:11px;color:#718096;margin-top:4px"></div>
+    <hr class="section-sep">
+    <div class="section-title">Checkpoint Recovery</div>
+    <button class="submit-btn" onclick="saveCheckpoint()" style="background:#744210;font-size:12px">Save Checkpoint</button>
+    <button class="submit-btn" onclick="resumeCheckpoint()" style="background:#276749;font-size:12px;margin-top:4px">Resume Checkpoint</button>
+    <div id="checkpoint-status" style="font-size:11px;color:#718096;margin-top:4px"></div>
+    <hr class="section-sep">
     <div class="section-title">Connections</div>
     <table class="status-table" id="status-table">
       <tbody id="status-body"><tr><td colspan="2" style="color:#718096">Loading...</td></tr></tbody>
@@ -776,6 +842,12 @@ _HTML_UI = '''<!DOCTYPE html>
     <hr class="section-sep">
     <div class="section-title">Activity Feed</div>
     <div id="activity-feed"></div>
+    <hr class="section-sep">
+    <div class="section-title">N8N Workflows</div>
+    <div id="n8n-workflows" style="font-size:11px;color:#718096">Loading...</div>
+    <hr class="section-sep">
+    <div class="section-title">GitHub Operator</div>
+    <div id="github-status" style="font-size:11px;color:#718096">Loading...</div>
   </div>
 </div>
 <div id="msg-bar"></div>
@@ -807,20 +879,28 @@ function dotClass(v) {
 }
 
 function statusLabel(v) {
-  return {
-    'ok': 'OK', 'configured': 'Configured', 'unconfigured': 'Unconfigured',
-    'unreachable': 'Unreachable', 'external_only': 'External Only', 'partial': 'Partial'
-  }[v] || v;
+  return STATUS_DISPLAY[v] || v;
 }
 
 var CHANNEL_LABELS = {
   'ch_gmail': 'Gmail', 'ch_calendar': 'Google Calendar',
-  'ch_whatsapp': 'WhatsApp Web', 'ch_facebook': 'Facebook/Messenger',
-  'ch_instagram': 'Instagram DM',
+  'ch_whatsapp': 'WhatsApp Web', 'ch_facebook': 'Facebook',
+  'ch_messenger': 'Messenger', 'ch_instagram': 'Instagram DM',
+  'ch_telegram': 'Telegram',
+};
+
+var STATUS_DISPLAY = {
+  'ok': 'LIVE_VERIFIED', 'configured': 'LIVE_VERIFIED',
+  'partial': 'DEGRADED', 'unconfigured': 'UNAVAILABLE',
+  'unreachable': 'UNAVAILABLE', 'external_only': 'SESSION_REQUIRED',
 };
 
 function connLabel(k) {
   return CHANNEL_LABELS[k] || k;
+}
+
+function sdClass(v) {
+  return 'sd' + (STATUS_DISPLAY[v] || v);
 }
 
 function refreshStatus() {
@@ -834,15 +914,24 @@ function refreshStatus() {
       rows += '<tr><td colspan="2" style="font-size:10px;color:#a0aec0;padding-top:6px">CHANNELS</td></tr>';
       rows += ch.map(function(k){
         var v=conn[k];
-        return '<tr><td>'+connLabel(k)+'</td><td><span class="'+dotClass(v)+'"></span>'+statusLabel(v)+'</td></tr>';
+        var disp=STATUS_DISPLAY[v]||v;
+        return '<tr><td>'+connLabel(k)+'</td><td><span class="'+dotClass(v)+'" title="'+v+'"></span><span class="'+sdClass(v)+'">'+disp+'</span></td></tr>';
       }).join('');
       rows += '<tr><td colspan="2" style="font-size:10px;color:#a0aec0;padding-top:6px">INTEGRATIONS</td></tr>';
     }
     rows += main.map(function(k){
       var v=conn[k];
-      return '<tr><td>'+connLabel(k)+'</td><td><span class="'+dotClass(v)+'"></span>'+statusLabel(v)+'</td></tr>';
+      var disp=STATUS_DISPLAY[v]||v;
+      return '<tr><td>'+connLabel(k)+'</td><td><span class="'+dotClass(v)+'" title="'+v+'"></span><span class="'+sdClass(v)+'">'+disp+'</span></td></tr>';
     }).join('');
     document.getElementById('status-body').innerHTML = rows || '<tr><td colspan="2">No data</td></tr>';
+    // Update emergency stop badge
+    var badge = document.getElementById('estop-badge');
+    if (badge) {
+      var estop = d.emergency_stop_active;
+      badge.textContent = estop ? 'STOP ACTIVE' : 'CLEAR';
+      badge.className = 'estop-badge ' + (estop ? 'estop-badge-active' : 'estop-badge-clear');
+    }
   }).catch(function() {});
 }
 
@@ -1037,12 +1126,94 @@ function submitAITask() {
   });
 }
 
+function submitWebsiteForm() {
+  var email=document.getElementById('wf-email').value.trim();
+  var subject=document.getElementById('wf-subject').value.trim();
+  var message=document.getElementById('wf-message').value.trim();
+  var status=document.getElementById('wf-status');
+  if(!email||!message){status.textContent='email and message required';return;}
+  status.textContent='Submitting...';
+  apiFetch('/api/website-form',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({email:email,subject:subject,message:message})})
+  .then(function(d){
+    if(d.duplicate){
+      status.innerHTML='<span style="color:#fbd38d">DUPLICATE \u2014 task: '+d.task_id.substring(0,8)+'</span>';
+    } else {
+      status.innerHTML='<span style="color:#9ae6b4">WAITING_APPROVAL \u2014 task: '+d.task_id.substring(0,8)+'</span> | n8n:'+escHtml(d.n8n_status);
+      document.getElementById('wf-email').value='';
+      document.getElementById('wf-message').value='';
+    }
+    refreshTasks();
+  }).catch(function(e){status.textContent='ERROR: '+e.message;});
+}
+
+function refreshN8nWorkflows() {
+  apiFetch('/api/n8n/workflows').then(function(d) {
+    var el=document.getElementById('n8n-workflows');
+    if(!el) return;
+    if(d.error){el.innerHTML='<span style="color:#fbd38d">'+escHtml(d.error)+'</span>';return;}
+    var wfs=d.workflows||[];
+    if(!wfs.length){el.textContent='No workflows (n8n may be offline)';return;}
+    el.innerHTML=wfs.map(function(w){
+      var dot=w.active?'<span style="color:#9ae6b4">\u25cf</span>':'<span style="color:#fc8181">\u25cf</span>';
+      return dot+' '+escHtml(w.name||String(w.id))+' ('+escHtml(w.active?'active':'inactive')+')';
+    }).join('<br>');
+  }).catch(function(){
+    var el=document.getElementById('n8n-workflows');
+    if(el) el.innerHTML='<span style="color:#fc8181">UNAVAILABLE</span>';
+  });
+}
+
+function refreshGithubStatus() {
+  apiFetch('/api/github/ci-status').then(function(d) {
+    var el=document.getElementById('github-status');
+    if(!el) return;
+    el.innerHTML='<span style="color:#9ae6b4">Branch: '+escHtml(d.branch||'')+'</span><br>'+
+      'SHA: '+escHtml((d.sha||'').substring(0,7))+'<br>'+
+      'Ahead: '+escHtml(String(d.ahead||0))+'<br>'+
+      'Last: '+escHtml((d.last_commit||'').substring(0,50))+'<br>'+
+      '<span style="color:#fbd38d">Writes\u2192require approval</span>';
+  }).catch(function(){
+    var el=document.getElementById('github-status');
+    if(el) el.innerHTML='<span style="color:#fc8181">git unavailable</span>';
+  });
+}
+
+var _checkpointTaskId = null;
+function saveCheckpoint() {
+  if(!selectedTaskId){showMsg('Select a task first',true);return;}
+  _checkpointTaskId=selectedTaskId;
+  var status=document.getElementById('checkpoint-status');
+  status.textContent='Saving checkpoint...';
+  apiFetch('/api/checkpoint-save',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({task_id:selectedTaskId,reason:'manual_checkpoint_via_cc',
+      next_action:'resume_after_availability_restored'})})
+  .then(function(d){
+    status.innerHTML='<span style="color:#fbd38d">CHECKPOINT SAVED: '+escHtml(d.checkpoint||'')+'</span>';
+  }).catch(function(e){status.textContent='Error: '+e.message;});
+}
+
+function resumeCheckpoint() {
+  var tid=_checkpointTaskId||selectedTaskId;
+  if(!tid){showMsg('No checkpoint task selected',true);return;}
+  var status=document.getElementById('checkpoint-status');
+  status.textContent='Resuming...';
+  apiFetch('/api/checkpoint-resume',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({task_id:tid})})
+  .then(function(d){
+    status.innerHTML='<span style="color:#9ae6b4">RESUMED \u2014 duplicate_action: '+d.duplicate_action+'</span>';
+    refreshTasks();
+  }).catch(function(e){status.textContent='Error: '+e.message;});
+}
+
 function refresh() {
   updateClock();
   refreshStatus();
   refreshTasks();
   refreshActivity();
   refreshAIProviders();
+  refreshN8nWorkflows();
+  refreshGithubStatus();
 }
 
 function createChannelProposal() {
@@ -1250,6 +1421,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_github_status()
             elif path == '/api/n8n/workflows':
                 self._handle_n8n_workflows()
+            elif path == '/api/github/ci-status':
+                self._handle_github_ci_status()
+            elif path == '/api/emergency-status':
+                self._handle_emergency_status()
             else:
                 self._error(404, 'Not found')
         except Exception as exc:
@@ -1279,6 +1454,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_channel_approve(body)
             elif path == '/api/channel/reject':
                 self._handle_channel_reject(body)
+            elif path == '/api/website-form':
+                self._handle_website_form(body)
+            elif path == '/api/checkpoint-save':
+                self._handle_checkpoint_save(body)
+            elif path == '/api/checkpoint-resume':
+                self._handle_checkpoint_resume(body)
             else:
                 self._error(404, 'Not found')
         except json.JSONDecodeError:
@@ -1299,8 +1480,17 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception:
             n_tasks = -1
             states = {}
+        try:
+            from .safety import Controls
+            store2 = _get_store()
+            ctrl_status = Controls(store2).status()
+            store2.close()
+            emergency_active = bool(ctrl_status.get('stop_everything'))
+        except Exception:
+            emergency_active = False
         self._send_json({
             'connections': connections,
+            'emergency_stop_active': emergency_active,
             'stats': {
                 'task_count': n_tasks,
                 'states': states,
@@ -1718,6 +1908,164 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._error(500, str(exc))
 
+
+    def _handle_emergency_status(self):
+        """GET /api/emergency-status — current emergency control flag states."""
+        try:
+            from .safety import Controls, FLAGS
+            store = _get_store()
+            ctrl = Controls(store)
+            status = ctrl.status()
+            store.close()
+            self._send_json({k: bool(status[k]) for k in FLAGS})
+        except Exception as exc:
+            self._error(500, str(exc))
+
+    def _handle_github_ci_status(self):
+        """GET /api/github/ci-status — git status + CI URL + protected write boundary."""
+        try:
+            git_status = _read_github_status()
+            git_status['note'] = (
+                'CI conclusion requires logged-in browser at: '
+                + git_status.get('ci_check_url', 'https://github.com')
+            )
+            git_status['protected_write_ops'] = [
+                'git_commit', 'git_push', 'git_merge', 'git_branch_delete',
+            ]
+            git_status['write_requires_approval'] = True
+            self._send_json(_sanitize_obj(git_status))
+        except Exception as exc:
+            self._error(500, str(exc))
+
+    def _handle_website_form(self, body):
+        """POST /api/website-form — intake with validation, dedup, privacy, WAITING_APPROVAL."""
+        import hashlib
+        import re as _re
+        name = str(body.get('name', '')).strip()[:100]
+        email = str(body.get('email', '')).strip()[:200]
+        subject = str(body.get('subject', 'Website Form Submission')).strip()[:200]
+        message = str(body.get('message', '')).strip()[:2000]
+        if not email or not message:
+            self._error(400, 'email and message required')
+            return
+        if not _re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
+            self._error(400, 'invalid_email_format')
+            return
+        # Privacy: mask email; never log raw email or message body
+        masked_email = (email[:3] + '***@' + email.split('@', 1)[-1]
+                        if '@' in email else '[masked]')
+        safe_subject = _sanitize(subject) or 'Website Form Submission'
+        # Dedup: hash of (email|subject|message)
+        dedup_hash = hashlib.sha256(
+            f'{email}|{subject}|{message}'.encode()
+        ).hexdigest()[:32]
+        request_key = f'website_form:{dedup_hash}'
+        n8n_status = _check_n8n()
+        try:
+            store = _get_store()
+            existing = store.db.execute(
+                'SELECT id, state FROM tasks WHERE request_key=?', (request_key,)
+            ).fetchone()
+            if existing:
+                store.close()
+                self._send_json({
+                    'ok': True, 'duplicate': True,
+                    'task_id': existing['id'], 'state': existing['state'],
+                    'message': 'duplicate_submission_existing_task_returned',
+                })
+                return
+            preview = f'Website form [{masked_email}]: {safe_subject[:50]}'
+            task = store.create_task(
+                command=preview,
+                task_type='website_form',
+                project='zamal_operator',
+                request_key=request_key,
+                context={
+                    'inputs': [f'from:{masked_email}', f'subject:{safe_subject[:80]}'],
+                    'scope': 'website_form_draft',
+                    'evidence': [f'n8n_status:{n8n_status}', 'source:website_form'],
+                },
+            )
+            task_id = task['id']
+            _advance_task_to_waiting_approval(store, task_id)
+            store.close()
+            if n8n_status != 'ok':
+                threading.Thread(
+                    target=_send_telegram_notify,
+                    args=(task_id,
+                          f'n8n UNAVAILABLE \u2014 website form task queued: {preview[:80]}'),
+                    daemon=True,
+                ).start()
+            self._send_json({
+                'ok': True, 'duplicate': False,
+                'task_id': task_id, 'state': 'WAITING_APPROVAL',
+                'masked_from': masked_email, 'n8n_status': n8n_status,
+            }, 201)
+        except Exception as exc:
+            self._error(500, str(exc))
+
+    def _handle_checkpoint_save(self, body):
+        """POST /api/checkpoint-save — persist checkpoint + send ACTION_REQUIRED."""
+        task_id = str(body.get('task_id', '')).strip()
+        reason = _sanitize(str(body.get('reason', 'service_unavailable')).strip()[:200])
+        next_action = _sanitize(str(body.get('next_action', '')).strip()[:500])
+        if not task_id:
+            self._error(400, 'task_id required')
+            return
+        try:
+            store = _get_store()
+            task = store.task(task_id)
+            ctx = task.get('context') or {}
+            checkpoint_ts = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+            checkpoint_note = f'CHECKPOINT@{checkpoint_ts}|reason:{reason}'
+            evidence = list(ctx.get('evidence') or []) + [checkpoint_note]
+            store.patch_context(task_id, {
+                'next_action': next_action or f'resume_after:{reason}',
+                'evidence': evidence,
+            }, task['revision'])
+            store.close()
+            threading.Thread(
+                target=_send_telegram_notify,
+                args=(task_id, f'ACTION_REQUIRED: checkpoint saved \u2014 {reason}'),
+                daemon=True,
+            ).start()
+            self._send_json({
+                'ok': True, 'task_id': task_id,
+                'checkpoint': checkpoint_note, 'reason': reason,
+            })
+        except Exception as exc:
+            self._error(500, str(exc))
+
+    def _handle_checkpoint_resume(self, body):
+        """POST /api/checkpoint-resume — resume checkpointed task (idempotent, no duplicate)."""
+        task_id = str(body.get('task_id', '')).strip()
+        if not task_id:
+            self._error(400, 'task_id required')
+            return
+        try:
+            store = _get_store()
+            task = store.task(task_id)
+            ctx = task.get('context') or {}
+            prev = ctx.get('next_action')
+            if not prev:
+                store.close()
+                self._error(400, 'no_checkpoint_found')
+                return
+            resume_ts = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+            evidence = list(ctx.get('evidence') or []) + [f'RESUMED@{resume_ts}']
+            store.patch_context(task_id, {
+                'next_action': None,
+                'evidence': evidence,
+            }, task['revision'])
+            store.close()
+            self._send_json({
+                'ok': True, 'task_id': task_id,
+                'resumed': True, 'resumed_at': resume_ts,
+                'previous_checkpoint': prev,
+                'duplicate_action': False,
+            })
+        except Exception as exc:
+            self._error(500, str(exc))
 
     def _handle_github_status(self):
         """GET /api/github/status — read-only GitHub status via git CLI."""
