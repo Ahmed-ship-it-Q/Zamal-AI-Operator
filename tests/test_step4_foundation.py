@@ -1033,9 +1033,18 @@ class TestCVMatchScoring(unittest.TestCase):
     # -- Education / certification --
 
     def test_required_cert_absent_caps_education_to_zero(self):
-        from zamal_core.cv_profile import CVProfileProvider
+        from zamal_core.cv_profile import CVProfile
         from zamal_core.job_matcher import JobMatcher
-        real_profile = CVProfileProvider.load_cached_profile()  # B.Com only, no ACCA/CPA
+        import time
+        real_profile = CVProfile(
+            skills=['IFRS', 'Financial Reporting', 'Audit', 'Excel', 'Budgeting'],
+            years_experience=8,
+            qualifications=['b.com', 'bachelor of commerce'],
+            target_roles=['Senior Accountant', 'Finance Manager'],
+            target_locations=['Qatar', 'Doha'],
+            languages=['English', 'Arabic'],
+            authorized_at=time.time(),
+        )
         matcher = JobMatcher(profile=real_profile)
         job = self._make_job(
             'Senior Accountant',
@@ -1051,9 +1060,18 @@ class TestCVMatchScoring(unittest.TestCase):
 
     def test_preferred_cert_reduces_but_does_not_reject(self):
         """Preferred cert not in profile reduces score but job may still qualify."""
-        from zamal_core.cv_profile import CVProfileProvider
+        from zamal_core.cv_profile import CVProfile
         from zamal_core.job_matcher import JobMatcher
-        real_profile = CVProfileProvider.load_cached_profile()
+        import time
+        real_profile = CVProfile(
+            skills=['IFRS', 'Financial Reporting', 'Audit', 'Excel', 'Budgeting'],
+            years_experience=8,
+            qualifications=['b.com', 'bachelor of commerce'],
+            target_roles=['Senior Accountant', 'Finance Manager'],
+            target_locations=['Qatar', 'Doha'],
+            languages=['English', 'Arabic'],
+            authorized_at=time.time(),
+        )
         matcher = JobMatcher(profile=real_profile)
         job = self._make_job(
             'Senior Accountant',
