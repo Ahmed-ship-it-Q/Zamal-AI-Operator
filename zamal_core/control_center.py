@@ -2125,8 +2125,13 @@ class _Handler(BaseHTTPRequestHandler):
                     'updatedAt': w.get('updatedAt', ''),
                 } for w in workflows]
                 self._send_json({'workflows': summary, 'count': len(summary)})
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                self._send_json({'error': 'n8n_api_key_unauthorized', 'workflows': [], 'count': 0})
+            else:
+                self._send_json({'error': f'n8n_http_{exc.code}', 'workflows': [], 'count': 0})
         except Exception as exc:
-            self._error(500, str(exc))
+            self._send_json({'error': str(exc)[:120], 'workflows': [], 'count': 0})
 
 
 # Import Gate for use in handler
