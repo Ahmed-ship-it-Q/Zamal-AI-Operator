@@ -296,9 +296,28 @@ Browser-based AI providers (ChatGPT, Claude, Gemini, DeepSeek, Qwen, Kimi) start
 
 `POST /api/website-form` now forwards a sanitized lead payload to `http://127.0.0.1:5678/webhook/zamal-lead` when n8n is reachable. Raw PII is never forwarded — only `email_masked`, `subject[:80]`, `classification`, `task_type`, `task_id`, `privacy_level`. The webhook response `exec_id` is returned in the API response as `n8n_exec_id`. Webhook failure is non-fatal; task is already at WAITING_APPROVAL before the webhook call.
 
+### Gate A — n8n Original Account Restored (2026-09-15)
+
+n8n was incorrectly running from `zamal-ai-operator-backup/node_modules` with no `N8N_USER_FOLDER` set, causing it to fall back to `~/.n8n` (account: `zamal@operator.local`, 3 workflows). The original database is at `zamal-ai-operator-backup-20260913-164656/.n8n-data/.n8n/database.sqlite` (account: `zamalahmed006@gmail.com`, 11 workflows). Restart command uses `N8N_USER_FOLDER` pointing at the backup data folder with Node 22 via nvm. Session verified by owner login.
+
+### Gate C — AI Provider Health: LIVE_VERIFIED (2026-09-15)
+
+After force health check, all 6 browser AI providers return `LIVE_VERIFIED`: ChatGPT, Claude, Gemini, DeepSeek, Qwen, Kimi. Chrome sessions are active. The `SESSION_REQUIRED` initial-state fix (committed in 45ae049) ensures that un-checked providers show `SESSION_REQUIRED` rather than `UNAVAILABLE` on a fresh process start.
+
+### Gate D — Emergency Stop + CC Components Verified (2026-09-15)
+
+Live demo sequence:
+1. `/api/status` → `emergency_stop_active: false` (CLEAR)
+2. `POST /api/emergency-stop` `stop_everything` → `enabled: true`
+3. `Controls.check('email_send')` → `Denied: Emergency control blocks execution: stop_everything`
+4. `POST /api/emergency-stop-clear` → `enabled: false`
+5. `controls.status()['stop_everything']` → `0` (CLEAR restored)
+6. `/api/github/ci-status` → branch `main`, SHA `45ae049`, `write_requires_approval: true`
+7. CC HTML: all 11 component checks PASS (title, AI providers, estop-badge, ch_telegram, Website Form, GitHub Operator, Checkpoint, N8N Workflows, emergency-stop, LIVE_VERIFIED, SESSION_REQUIRED)
+
 ### Test Counts
 
 | Phase | Tests Added | Cumulative |
 |-------|------------|-----------|
 | Step 3C | 44 | 1325 |
-| Step 3C live closure | 0 (code fixes, no new tests) | 1325 |
+| Step 3C live closure | 0 (live evidence, no new tests) | 1325 |
