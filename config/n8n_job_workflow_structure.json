@@ -1,0 +1,73 @@
+{
+  "meta": {
+    "note": "Step 4 n8n workflow structure — ALL workflows INACTIVE in foundation phase.",
+    "status": "INACTIVE",
+    "phase": "foundation",
+    "activate_in": "Step 4 live phase, after explicit operator authorization"
+  },
+  "workflows": [
+    {
+      "id": "job-intake",
+      "name": "Zamal Job Intake",
+      "active": false,
+      "description": "Receives normalized job listings from adapters, validates schema, deduplicates, routes to scorer.",
+      "trigger": "webhook",
+      "webhook_path": "zamal-job-intake",
+      "nodes": [
+        {"name": "Webhook Trigger",   "type": "n8n-nodes-base.webhook",     "active": false},
+        {"name": "Schema Validator",  "type": "n8n-nodes-base.function",    "active": false},
+        {"name": "Dedup Check",       "type": "n8n-nodes-base.httpRequest", "active": false},
+        {"name": "Route to Scorer",   "type": "n8n-nodes-base.httpRequest", "active": false},
+        {"name": "Error Handler",     "type": "n8n-nodes-base.function",    "active": false}
+      ]
+    },
+    {
+      "id": "job-scoring",
+      "name": "Zamal Job Scoring",
+      "active": false,
+      "description": "Runs explainable matching engine against CV profile; advances NORMALIZED → SCORED → SHORTLISTED or REJECTED.",
+      "trigger": "webhook",
+      "webhook_path": "zamal-job-scoring",
+      "nodes": [
+        {"name": "Webhook Trigger",   "type": "n8n-nodes-base.webhook",     "active": false},
+        {"name": "Load Profile",      "type": "n8n-nodes-base.httpRequest", "active": false},
+        {"name": "Score Job",         "type": "n8n-nodes-base.function",    "active": false},
+        {"name": "Shortlist Gate",    "type": "n8n-nodes-base.if",          "active": false},
+        {"name": "Advance State",     "type": "n8n-nodes-base.httpRequest", "active": false},
+        {"name": "Telegram Notify",   "type": "n8n-nodes-base.httpRequest", "active": false}
+      ]
+    },
+    {
+      "id": "job-approval",
+      "name": "Zamal Job Approval",
+      "active": false,
+      "description": "Handles APPROVAL_REQUIRED → APPROVED/REJECTED decision loop via Control Center and Telegram.",
+      "trigger": "webhook",
+      "webhook_path": "zamal-job-approval",
+      "nodes": [
+        {"name": "Webhook Trigger",       "type": "n8n-nodes-base.webhook",     "active": false},
+        {"name": "Validate Approval ID",  "type": "n8n-nodes-base.function",    "active": false},
+        {"name": "Record Decision",       "type": "n8n-nodes-base.httpRequest", "active": false},
+        {"name": "Advance State",         "type": "n8n-nodes-base.httpRequest", "active": false},
+        {"name": "Route APPROVED",        "type": "n8n-nodes-base.if",          "active": false},
+        {"name": "Telegram Confirm",      "type": "n8n-nodes-base.httpRequest", "active": false}
+      ]
+    },
+    {
+      "id": "job-application",
+      "name": "Zamal Job Application Executor",
+      "active": false,
+      "description": "Executes APPROVED applications via JobApplicationExecutor. Disabled until live phase.",
+      "trigger": "webhook",
+      "webhook_path": "zamal-job-application",
+      "nodes": [
+        {"name": "Webhook Trigger",     "type": "n8n-nodes-base.webhook",     "active": false},
+        {"name": "Verify Approval",     "type": "n8n-nodes-base.function",    "active": false},
+        {"name": "Emergency Stop Gate", "type": "n8n-nodes-base.httpRequest", "active": false},
+        {"name": "Execute Application", "type": "n8n-nodes-base.httpRequest", "active": false},
+        {"name": "Record Outcome",      "type": "n8n-nodes-base.httpRequest", "active": false},
+        {"name": "Telegram Receipt",    "type": "n8n-nodes-base.httpRequest", "active": false}
+      ]
+    }
+  ]
+}

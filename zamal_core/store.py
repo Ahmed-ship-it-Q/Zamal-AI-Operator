@@ -107,6 +107,10 @@ class Policy:
             from .job_app import JOB_APP_SAFE, JOB_APP_PROTECTED
             if kind in JOB_APP_PROTECTED: return True
             if kind in JOB_APP_SAFE: return False
+        if isinstance(kind, str) and kind.startswith('job_'):
+            from .job_lifecycle import JOB_LIFECYCLE_SAFE, JOB_LIFECYCLE_PROTECTED
+            if kind in JOB_LIFECYCLE_PROTECTED: return True
+            if kind in JOB_LIFECYCLE_SAFE: return False
         if kind == 'git_commit':
             return self.protect_commits
         if kind in self.PROTECTED:
@@ -298,6 +302,8 @@ class Store:
         migrate_personal_ops(self)
         from .job_app import migrate_job_app
         migrate_job_app(self)
+        from .job_lifecycle import migrate_job_lifecycle
+        migrate_job_lifecycle(self)
 
     def close(self):
         self.db.close()

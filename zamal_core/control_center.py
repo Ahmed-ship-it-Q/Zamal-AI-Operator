@@ -15,6 +15,11 @@ Endpoints:
   GET  /api/ai-providers        Browser AI provider statuses
   POST /api/ai-task             Submit task through smart AI router
   POST /api/ai-health-check     Force health check for one provider
+  GET  /api/jobs/sources        Job source session metadata (Step 4)
+  GET  /api/jobs/shortlist      Current shortlisted job listings (Step 4)
+  GET  /api/jobs/history        Application history (Step 4)
+  POST /api/jobs/approve        Advance listing to APPROVED (Step 4)
+  POST /api/jobs/reject         Move listing to REJECTED (Step 4)
 """
 import json
 import os
@@ -848,6 +853,15 @@ _HTML_UI = '''<!DOCTYPE html>
     <hr class="section-sep">
     <div class="section-title">GitHub Operator</div>
     <div id="github-status" style="font-size:11px;color:#718096">Loading...</div>
+    <hr class="section-sep">
+    <div class="section-title">Job Sources</div>
+    <div id="job-sources" style="font-size:11px;color:#718096">Loading...</div>
+    <hr class="section-sep">
+    <div class="section-title">Job Shortlist</div>
+    <div id="job-shortlist" style="font-size:11px;color:#718096">Loading...</div>
+    <hr class="section-sep">
+    <div class="section-title">Application History</div>
+    <div id="job-history" style="font-size:11px;color:#718096">Loading...</div>
   </div>
 </div>
 <div id="msg-bar"></div>
@@ -1214,6 +1228,87 @@ function refresh() {
   refreshAIProviders();
   refreshN8nWorkflows();
   refreshGithubStatus();
+  refreshJobSources();
+  refreshJobShortlist();
+  refreshJobHistory();
+}
+
+function refreshJobSources() {
+  apiFetch('/api/jobs/sources').then(function(d) {
+    var src = d.sources || {};
+    var html = Object.keys(src).map(function(k) {
+      var s = src[k];
+      var dot = s.logged_in ? '\u2022' : '\u25e6';
+      var col = s.logged_in ? '#68d391' : '#fc8181';
+      return '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">' +
+        '<span style="color:' + col + ';font-size:14px">' + dot + '</span>' +
+        '<b>' + escHtml(k) + '</b>: ' + escHtml(s.note || '?') + '</div>';
+    }).join('');
+    document.getElementById('job-sources').innerHTML = html || '<i>No sources configured</i>';
+  }).catch(function() {
+    document.getElementById('job-sources').textContent = 'unavailable';
+  });
+}
+
+function refreshJobShortlist() {
+  apiFetch('/api/jobs/shortlist').then(function(d) {
+    var list = d.shortlist || [];
+    if (!list.length) {
+      document.getElementById('job-shortlist').innerHTML = '<i style="color:#718096">No shortlisted jobs</i>';
+      return;
+    }
+    var html = list.map(function(j) {
+      return '<div style="background:#2d3748;border-radius:4px;padding:6px;margin-bottom:6px">' +
+        '<div><b>' + escHtml(j.title) + '</b> @ ' + escHtml(j.company) + '</div>' +
+        '<div style="color:#a0aec0;font-size:10px">' + escHtml(j.source) + ' | ' +
+        escHtml(j.location) + ' | Score: <b style="color:#68d391">' + j.score + '/99</b> | ' +
+        escHtml(j.state) + '</div>' +
+        '<div style="margin-top:4px;display:flex;gap:4px">' +
+        '<button onclick="jobApprove(\'' + j.id + '\')" style="background:#276749;color:#fff;border:none;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">APPROVE</button>' +
+        '<button onclick="jobReject(\'' + j.id + '\')" style="background:#742a2a;color:#fff;border:none;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">REJECT</button>' +
+        '</div></div>';
+    }).join('');
+    document.getElementById('job-shortlist').innerHTML = html;
+  }).catch(function() {
+    document.getElementById('job-shortlist').textContent = 'unavailable';
+  });
+}
+
+function refreshJobHistory() {
+  apiFetch('/api/jobs/history').then(function(d) {
+    var list = d.history || [];
+    if (!list.length) {
+      document.getElementById('job-history').innerHTML = '<i style="color:#718096">No history yet</i>';
+      return;
+    }
+    var html = list.slice(0,10).map(function(j) {
+      var col = j.state === 'APPROVED' ? '#68d391' : j.state === 'REJECTED' ? '#fc8181' : '#a0aec0';
+      return '<div style="margin-bottom:3px;font-size:11px">' +
+        '<span style="color:' + col + '">' + escHtml(j.state) + '</span> — ' +
+        escHtml(j.title) + ' @ ' + escHtml(j.company) + '</div>';
+    }).join('');
+    document.getElementById('job-history').innerHTML = html;
+  }).catch(function() {
+    document.getElementById('job-history').textContent = 'unavailable';
+  });
+}
+
+function jobApprove(listingId) {
+  apiFetch('/api/jobs/approve', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({listing_id: listingId})})
+  .then(function(d) {
+    showMsg('Job approved: ' + listingId.substring(0,8), false);
+    refreshJobShortlist(); refreshJobHistory();
+  }).catch(function(e) { showMsg('Approve failed: ' + e.message, true); });
+}
+
+function jobReject(listingId) {
+  apiFetch('/api/jobs/reject', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({listing_id: listingId, reason: 'operator_rejected_via_cc'})})
+  .then(function(d) {
+    showMsg('Job rejected: ' + listingId.substring(0,8), false);
+    refreshJobShortlist(); refreshJobHistory();
+  }).catch(function(e) { showMsg('Reject failed: ' + e.message, true); });
 }
 
 function createChannelProposal() {
@@ -1425,6 +1520,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_github_ci_status()
             elif path == '/api/emergency-status':
                 self._handle_emergency_status()
+            elif path == '/api/jobs/sources':
+                self._handle_job_sources()
+            elif path == '/api/jobs/shortlist':
+                self._handle_job_shortlist()
+            elif path == '/api/jobs/history':
+                self._handle_job_history()
             else:
                 self._error(404, 'Not found')
         except Exception as exc:
@@ -1460,6 +1561,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_checkpoint_save(body)
             elif path == '/api/checkpoint-resume':
                 self._handle_checkpoint_resume(body)
+            elif path == '/api/jobs/approve':
+                self._handle_job_approve(body)
+            elif path == '/api/jobs/reject':
+                self._handle_job_reject(body)
             else:
                 self._error(404, 'Not found')
         except json.JSONDecodeError:
@@ -2132,6 +2237,112 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({'error': f'n8n_http_{exc.code}', 'workflows': [], 'count': 0})
         except Exception as exc:
             self._send_json({'error': str(exc)[:120], 'workflows': [], 'count': 0})
+
+
+    # ── Step 4 job endpoints ──────────────────────────────────────────────────
+
+    def _handle_job_sources(self):
+        """GET /api/jobs/sources — session metadata for LinkedIn and Qatar Living."""
+        try:
+            from .job_source_adapter import all_session_statuses
+            self._send_json({'sources': all_session_statuses()})
+        except Exception as exc:
+            self._send_json({'sources': {}, 'error': str(exc)[:120]})
+
+    def _handle_job_shortlist(self):
+        """GET /api/jobs/shortlist — current SHORTLISTED/WAITING_APPROVAL listings."""
+        try:
+            store = _get_store()
+            from .job_lifecycle import JobListingStore
+            jls = JobListingStore(store)
+            rows = jls.shortlist()
+            store.close()
+            safe = [{
+                'id': r['id'], 'source': r['source'], 'title': r['title'],
+                'company': r['company'], 'location': r['location'],
+                'score': r['score'], 'state': r['state'],
+                'posted_date': r['posted_date'], 'url': r['url'],
+                'score_breakdown': json.loads(r['score_breakdown'] or '{}'),
+                'matched_keywords': json.loads(r['matched_keywords'] or '[]'),
+            } for r in rows]
+            self._send_json({'shortlist': safe, 'count': len(safe)})
+        except Exception as exc:
+            self._send_json({'shortlist': [], 'count': 0, 'error': str(exc)[:120]})
+
+    def _handle_job_history(self):
+        """GET /api/jobs/history — completed/approved/rejected listings."""
+        try:
+            store = _get_store()
+            from .job_lifecycle import JobListingStore
+            jls = JobListingStore(store)
+            rows = jls.history()
+            store.close()
+            safe = [{
+                'id': r['id'], 'source': r['source'], 'title': r['title'],
+                'company': r['company'], 'location': r['location'],
+                'score': r['score'], 'state': r['state'],
+                'rejection_reason': r['rejection_reason'] or '',
+            } for r in rows]
+            self._send_json({'history': safe, 'count': len(safe)})
+        except Exception as exc:
+            self._send_json({'history': [], 'count': 0, 'error': str(exc)[:120]})
+
+    def _handle_job_approve(self, body):
+        """POST /api/jobs/approve — advance listing SHORTLISTED→WAITING_APPROVAL→APPROVED."""
+        listing_id = str(body.get('listing_id', '')).strip()
+        if not listing_id:
+            self._error(400, 'listing_id required')
+            return
+        try:
+            store = _get_store()
+            from .job_lifecycle import JobListingStore
+            jls = JobListingStore(store)
+            listing = jls.get(listing_id)
+            if not listing:
+                store.close()
+                self._error(404, 'listing not found')
+                return
+            current = listing['state']
+            if current == 'SHORTLISTED':
+                jls.advance(listing_id, 'WAITING_APPROVAL')
+                current = 'WAITING_APPROVAL'
+            if current == 'WAITING_APPROVAL':
+                jls.advance(listing_id, 'APPROVED')
+            store.close()
+            self._send_json({'ok': True, 'listing_id': listing_id, 'state': 'APPROVED'})
+        except Exception as exc:
+            self._error(400, str(exc))
+
+    def _handle_job_reject(self, body):
+        """POST /api/jobs/reject — move listing to REJECTED (zero external action)."""
+        listing_id = str(body.get('listing_id', '')).strip()
+        reason = str(body.get('reason', 'operator_rejected')).strip() or 'operator_rejected'
+        if not listing_id:
+            self._error(400, 'listing_id required')
+            return
+        try:
+            store = _get_store()
+            from .job_lifecycle import JobListingStore
+            jls = JobListingStore(store)
+            listing = jls.get(listing_id)
+            if not listing:
+                store.close()
+                self._error(404, 'listing not found')
+                return
+            current = listing['state']
+            allowed_to_reject = {'SCORED', 'SHORTLISTED', 'WAITING_APPROVAL',
+                                  'NORMALIZED', 'DISCOVERED'}
+            if current in allowed_to_reject:
+                jls.advance(listing_id, 'REJECTED')
+                store.db.execute(
+                    'UPDATE job_listings SET rejection_reason=? WHERE id=?',
+                    (reason[:200], listing_id)
+                )
+            store.close()
+            self._send_json({'ok': True, 'listing_id': listing_id,
+                             'state': 'REJECTED', 'reason': reason})
+        except Exception as exc:
+            self._error(400, str(exc))
 
 
 # Import Gate for use in handler

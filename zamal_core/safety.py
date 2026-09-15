@@ -23,7 +23,7 @@ READ_ONLY = frozenset({'read', 'search', 'inspect', 'analyze', 'research', 'plan
 EXTERNAL = frozenset({'email_send', 'job_submit', 'profile_mutate', 'git_push',
                       'git_merge', 'deploy', 'payment', 'credential_change',
                       'security_change', 'external_irreversible', 'ai_inference',
-                      'job_app_submit'})
+                      'job_app_submit', 'job_submit_application', 'job_search_activate'})
 
 
 class Controls:

@@ -321,3 +321,29 @@ Live demo sequence:
 |-------|------------|-----------|
 | Step 3C | 44 | 1325 |
 | Step 3C live closure | 0 (live evidence, no new tests) | 1325 |
+
+### Step 4 Foundation — Qatar Job Automation (2026-09-15)
+
+**Scope:** Structure only — no live job search, no CV read, no real applications.
+
+**New modules:**
+- `zamal_core/job_schema.py` — NormalizedJob, JobQuery, MatchResult, JOB_STATES (9 states)
+- `zamal_core/job_source_adapter.py` — LinkedInAdapter + QatarLivingAdapter; `discover_jobs()` disabled (raises NotImplementedError); `session_status()` reads browser tab metadata only
+- `zamal_core/cv_profile.py` — CVProfileProvider with `_ENABLED=False`; requires explicit `authorize()` + `ZAMAL_CV_PATH` env var (never committed); `get_fixture_profile()` needs no auth
+- `zamal_core/job_matcher.py` — Explainable scoring: location_match(0|25) + role_match(0|25) + keyword_match(0–25) + recency(0–15) + requirements_fit(0–9); SCORE_MIN=90, SCORE_MAX=99; pre-score rejection rules: duplicate, non-Qatar, non-finance, expired(>60 days)
+- `zamal_core/job_lifecycle.py` — JobListingStore (SQLite), JobTelegramNotifier (sanitized metadata only), JobApplicationExecutor (`_LIVE_ENABLED=False`, raises NotImplementedError)
+- `config/n8n_job_workflow_structure.json` — 4 inactive workflows (intake/scoring/approval/application); all `"active": false`
+
+**Modified:**
+- `zamal_core/store.py` — `migrate_job_lifecycle()` called on init; `Policy.requires_approval()` dispatches `job_` kinds
+- `zamal_core/safety.py` — `job_submit_application` and `job_search_activate` added to EXTERNAL (blocked by `pause_external_actions`)
+- `zamal_core/control_center.py` — 5 new `/api/jobs/*` endpoints; Job Sources, Shortlist, Application History sections in CC HTML
+
+**Test count:** 98 new tests → 1423 total (all passing).
+
+### Test Counts
+
+| Phase | Tests Added | Cumulative |
+|-------|------------|-----------|
+| Step 3C | 44 | 1325 |
+| Step 4 Foundation | 98 | 1423 |
