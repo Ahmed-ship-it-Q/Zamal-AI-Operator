@@ -1,6 +1,23 @@
 # Zamal AI Operator — Current Handoff
 
-## Status
+## Current Step 5 acceptance — 2026-09-15
+
+[Step 5 evidence](docs/STEP5_ACCEPTANCE_EVIDENCE.md) is authoritative for the
+current delivery and supersedes historical completion claims below.
+The recovery defects are repaired; 191 focused checks and 1454 full-regression
+tests passed. The delivered commit's exact-SHA CI result is recorded by GitHub
+Actions and the delivery receipt. A clean ordinary push and successful exact-SHA CI are
+mandatory acceptance gates.
+
+Step 4 is **FOUNDATION/STRUCTURE COMPLETE**. CV editing, LinkedIn optimization,
+live LinkedIn/Qatar Living matching and applications remain deferred. AIApply
+remains removed. n8n health/readiness passed; its original database has one
+account and 11 workflows, inspected read-only. Claude currently requires a
+session; historical live-provider claims must not be read as current health.
+CPC was not accessed or changed. The empty root `:memory:` artifact is preserved
+with an exact ignore rule. Use `python3 scripts/run_tests.py` for isolated tests.
+
+## Historical status — retained as prior evidence
 All steps GREEN — 996/996 PASS
 
 - Full regression: 996/996 PASS (2026-09-13 Final Evidence Gate — confirmed)
@@ -86,4 +103,3 @@ Record evidence.
 - Approval-gated submission: supported — Operator prepares, pauses before submit, requests Telegram approval, after APPROVE completes and verifies
 - L-3 source gap: current sources (Arbeitnow, RemoteOK, Jobicy, Remotive) are remote-work boards; Qatar/GCC on-site accounting roles structurally absent; credential-free Gulf feeds tested and rejected; premium provider credentials required to close gap
 - CPC project: NOT TOUCHED
-

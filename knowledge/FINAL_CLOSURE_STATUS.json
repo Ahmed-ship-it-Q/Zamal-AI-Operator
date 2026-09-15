@@ -1,27 +1,19 @@
 {
   "project": "Zamal AI Operator",
-  "closure_status": "GREEN",
-  "closure_milestone": "100%",
+  "closure_status": "SEE_STEP5_ACCEPTANCE_EVIDENCE",
   "closed_at_utc": "2026-09-12T21:45:00.000000+00:00",
   "step4_updated_at": "2026-09-12T21:45:00.000000+00:00",
   "regression": {
-    "tests_passed": 996,
+    "tests_passed": 1454,
     "tests_failed": 0,
-    "evidence": "outbox/2026-09-12/step1-step3/status.json",
-    "historical_baselines": {
-      "pre_quality_elevation_reaudit_2026_09_13": 924,
-      "pre_codex_step": 920
-    },
-    "quality_elevation_reaudit": "2026-09-13",
-    "final_evidence_gate_reaudit": "2026-09-13",
-    "final_evidence_gate_count": 996
+    "evidence": "docs/STEP5_ACCEPTANCE_EVIDENCE.md"
   },
   "runtime": {
     "n8n_5678_live": true,
-    "cpc_inspector_8787_live": true,
-    "n8n_workflows": 10,
-    "n8n_credentials": 10,
-    "cpc_git_sha": "eae0f7b"
+    "n8n_workflows": 11,
+    "n8n_accounts": 1,
+    "cpc": "NOT_ACCESSED",
+    "claude_browser": "SESSION_REQUIRED"
   },
   "verified_integrations": {
     "gmail": "LIVE_VERIFIED",
@@ -36,7 +28,12 @@
     "L3_qatar_gcc_job_source_coverage": {
       "status": "DECISION_BLOCKED",
       "detail": "Job search machinery is LIVE_VERIFIED. All four current public sources (Arbeitnow, RemoteOK, Jobicy, Remotive) are remote-work boards; on-site Qatar/GCC accounting roles are structurally absent. Five credential-free GulfTalent/Bayt RSS URLs were tested and rejected (HTML/403). Closing requires operator-supplied credentials.",
-      "credential_options": ["GULFTALENT_API_KEY", "BAYT_API_KEY+BAYT_API_SECRET", "ZAMAL_LINKEDIN_CLIENT_ID+SECRET", "INDEED_PUBLISHER_ID"],
+      "credential_options": [
+        "GULFTALENT_API_KEY",
+        "BAYT_API_KEY+BAYT_API_SECRET",
+        "ZAMAL_LINKEDIN_CLIENT_ID+SECRET",
+        "INDEED_PUBLISHER_ID"
+      ],
       "release_blocker": false,
       "recorded_at": "2026-09-13"
     }
@@ -73,5 +70,53 @@
     "Replay Protection": "LIVE_VERIFIED",
     "Emergency Stop": "LIVE_VERIFIED",
     "Private Filesystem Protection": "LIVE_VERIFIED"
-  }
+  },
+  "step5_acceptance": {
+    "date": "2026-09-15",
+    "evidence": "docs/STEP5_ACCEPTANCE_EVIDENCE.md",
+    "step4": "FOUNDATION_STRUCTURE_COMPLETE",
+    "recovery": "DURABLE_DEDUP_AND_SESSION_GATED",
+    "regression": {
+      "passed": 1454,
+      "failed": 0,
+      "command": "python3 scripts/run_tests.py"
+    },
+    "ci_gate": "Successful push run with head_sha equal to delivered commit; see delivery receipt",
+    "n8n": {
+      "health_http": 200,
+      "readiness_http": 200,
+      "workflows": 11,
+      "accounts": 1,
+      "database_access": "READ_ONLY"
+    },
+    "current_claude_session": "SESSION_REQUIRED",
+    "deferred": [
+      "CV editing",
+      "LinkedIn optimization",
+      "LinkedIn/Qatar Living live CV matching",
+      "job discovery and applications"
+    ],
+    "aiapply": "REMOVED"
+  },
+  "historical_closure_status": "GREEN",
+  "historical_regression": {
+    "tests_passed": 996,
+    "tests_failed": 0,
+    "evidence": "outbox/2026-09-12/step1-step3/status.json",
+    "historical_baselines": {
+      "pre_quality_elevation_reaudit_2026_09_13": 924,
+      "pre_codex_step": 920
+    },
+    "quality_elevation_reaudit": "2026-09-13",
+    "final_evidence_gate_reaudit": "2026-09-13",
+    "final_evidence_gate_count": 996
+  },
+  "historical_runtime": {
+    "n8n_5678_live": true,
+    "cpc_inspector_8787_live": true,
+    "n8n_workflows": 10,
+    "n8n_credentials": 10,
+    "cpc_git_sha": "eae0f7b"
+  },
+  "historical_closure_milestone": "100%"
 }

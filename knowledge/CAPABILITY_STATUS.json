@@ -347,7 +347,7 @@
     {
       "name": "Emergency Stop",
       "status": "LIVE_VERIFIED",
-      "verified_scope": "Latched controls live-tested 2026-09-09: epoch incremented 1→2, all Mac dispatch blocked during stop, Denied raised as expected; resume restored normal operation; control_audit append-only trigger verified. Global emergency state returned all-OFF after test. See ROADMAP_STATE.md MAC SAFETY OPERATIONS section.",
+      "verified_scope": "Latched controls live-tested 2026-09-09: epoch incremented 1\u21922, all Mac dispatch blocked during stop, Denied raised as expected; resume restored normal operation; control_audit append-only trigger verified. Global emergency state returned all-OFF after test. See ROADMAP_STATE.md MAC SAFETY OPERATIONS section.",
       "evidence": [],
       "owner_action": null
     },
@@ -363,5 +363,33 @@
       ],
       "owner_action": null
     }
-  ]
+  ],
+  "step5_acceptance": {
+    "date": "2026-09-15",
+    "evidence": "docs/STEP5_ACCEPTANCE_EVIDENCE.md",
+    "step4": "FOUNDATION_STRUCTURE_COMPLETE",
+    "recovery": "DURABLE_DEDUP_AND_SESSION_GATED",
+    "regression": {
+      "passed": 1454,
+      "failed": 0,
+      "command": "python3 scripts/run_tests.py"
+    },
+    "ci_gate": "Successful push run with head_sha equal to delivered commit; see delivery receipt",
+    "n8n": {
+      "health_http": 200,
+      "readiness_http": 200,
+      "workflows": 11,
+      "accounts": 1,
+      "database_access": "READ_ONLY"
+    },
+    "current_claude_session": "SESSION_REQUIRED",
+    "deferred": [
+      "CV editing",
+      "LinkedIn optimization",
+      "LinkedIn/Qatar Living live CV matching",
+      "job discovery and applications"
+    ],
+    "aiapply": "REMOVED"
+  },
+  "verification_scope_note": "Earlier LIVE_VERIFIED entries retain their historical scope. Current Step 5 evidence and session limitations are in step5_acceptance."
 }

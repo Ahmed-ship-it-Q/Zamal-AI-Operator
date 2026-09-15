@@ -825,6 +825,15 @@ _HTML_UI = '''<!DOCTYPE html>
     <div id="wf-status" style="font-size:11px;color:#718096;margin-top:4px"></div>
     <hr class="section-sep">
     <div class="section-title">Checkpoint Recovery</div>
+    <label for="checkpoint-session">Required session</label>
+    <select id="checkpoint-session">
+      <option value="unspecified">Select session before saving</option>
+      <option value="local">Local task (no browser session)</option>
+      <option>chatgpt</option><option>claude</option><option>gemini</option>
+      <option>deepseek</option><option>qwen</option><option>kimi</option>
+      <option>linkedin</option><option>qatar_living</option>
+      <option>gmail</option><option>whatsapp</option><option>instagram</option><option>messenger</option>
+    </select>
     <button class="submit-btn" onclick="saveCheckpoint()" style="background:#744210;font-size:12px">Save Checkpoint</button>
     <button class="submit-btn" onclick="resumeCheckpoint()" style="background:#276749;font-size:12px;margin-top:4px">Resume Checkpoint</button>
     <div id="checkpoint-status" style="font-size:11px;color:#718096;margin-top:4px"></div>
@@ -904,7 +913,7 @@ var CHANNEL_LABELS = {
 };
 
 var STATUS_DISPLAY = {
-  'ok': 'LIVE_VERIFIED', 'configured': 'LIVE_VERIFIED',
+  'ok': 'HEALTHY', 'configured': 'CONFIGURED',
   'partial': 'DEGRADED', 'unconfigured': 'UNAVAILABLE',
   'unreachable': 'UNAVAILABLE', 'external_only': 'SESSION_REQUIRED',
 };
@@ -1197,11 +1206,13 @@ var _checkpointTaskId = null;
 function saveCheckpoint() {
   if(!selectedTaskId){showMsg('Select a task first',true);return;}
   _checkpointTaskId=selectedTaskId;
+  var session=document.getElementById('checkpoint-session').value;
+  if(session==='unspecified'){showMsg('Select the required session first',true);return;}
   var status=document.getElementById('checkpoint-status');
   status.textContent='Saving checkpoint...';
   apiFetch('/api/checkpoint-save',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({task_id:selectedTaskId,reason:'manual_checkpoint_via_cc',
-      next_action:'resume_after_availability_restored'})})
+      next_action:'resume_after_availability_restored',required_session:session})})
   .then(function(d){
     status.innerHTML='<span style="color:#fbd38d">CHECKPOINT SAVED: '+escHtml(d.checkpoint||'')+'</span>';
   }).catch(function(e){status.textContent='Error: '+e.message;});
@@ -1215,6 +1226,7 @@ function resumeCheckpoint() {
   apiFetch('/api/checkpoint-resume',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({task_id:tid})})
   .then(function(d){
+    if(!d.resumed){status.textContent=d.status||'ACTION_REQUIRED';return;}
     status.innerHTML='<span style="color:#9ae6b4">RESUMED \u2014 duplicate_action: '+d.duplicate_action+'</span>';
     refreshTasks();
   }).catch(function(e){status.textContent='Error: '+e.message;});
@@ -2134,67 +2146,62 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(500, str(exc))
 
     def _handle_checkpoint_save(self, body):
-        """POST /api/checkpoint-save — persist checkpoint + send ACTION_REQUIRED."""
+        """Persist one notification claim per pending checkpoint before dispatch."""
+        from .checkpoint import save
+        from .store import Conflict
         task_id = str(body.get('task_id', '')).strip()
-        reason = _sanitize(str(body.get('reason', 'service_unavailable')).strip()[:200])
-        next_action = _sanitize(str(body.get('next_action', '')).strip()[:500])
+        reason = str(body.get('reason', 'service_unavailable'))
+        if not re.fullmatch(r'[a-z_]{1,64}', reason):
+            reason = 'human_action_required'
+        next_action = str(body.get('next_action', ''))
+        if not re.fullmatch(r'[a-z_:]{1,100}', next_action):
+            next_action = f'resume_after:{reason}'
+        session = body.get('required_session')
+        if session is not None and (not isinstance(session, str) or
+                                   not re.fullmatch(r'[a-z_]{1,32}', session)):
+            self._error(400, 'invalid_required_session')
+            return
+        if session is None and any(x in reason for x in ('session', 'login', 'captcha', 'otp', 'auth')):
+            session = 'unspecified'
         if not task_id:
             self._error(400, 'task_id required')
             return
+        store = _get_store()
         try:
-            store = _get_store()
-            task = store.task(task_id)
-            ctx = task.get('context') or {}
-            checkpoint_ts = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-            checkpoint_note = f'CHECKPOINT@{checkpoint_ts}|reason:{reason}'
-            evidence = list(ctx.get('evidence') or []) + [checkpoint_note]
-            store.patch_context(task_id, {
-                'next_action': next_action or f'resume_after:{reason}',
-                'evidence': evidence,
-            }, task['revision'])
+            checkpoint, dispatch = save(store, task_id, reason, next_action, session)
+            if dispatch:
+                threading.Thread(target=_send_telegram_notify,
+                                 args=(task_id, 'ACTION_REQUIRED: complete the human action before resuming.'),
+                                 daemon=True).start()
+            self._send_json({'ok': True, 'task_id': task_id, 'checkpoint': checkpoint['note'],
+                             'reason': reason, 'duplicate': not dispatch})
+        except Conflict:
+            self._error(409, 'checkpoint_conflict')
+        except Exception:
+            self._error(500, 'checkpoint_save_failed')
+        finally:
             store.close()
-            threading.Thread(
-                target=_send_telegram_notify,
-                args=(task_id, f'ACTION_REQUIRED: checkpoint saved \u2014 {reason}'),
-                daemon=True,
-            ).start()
-            self._send_json({
-                'ok': True, 'task_id': task_id,
-                'checkpoint': checkpoint_note, 'reason': reason,
-            })
-        except Exception as exc:
-            self._error(500, str(exc))
 
     def _handle_checkpoint_resume(self, body):
-        """POST /api/checkpoint-resume — resume checkpointed task (idempotent, no duplicate)."""
+        """Resume the same task only after its persisted session requirement passes."""
+        from .checkpoint import resume
+        from .store import Conflict, Denied
         task_id = str(body.get('task_id', '')).strip()
         if not task_id:
             self._error(400, 'task_id required')
             return
+        store = _get_store()
         try:
-            store = _get_store()
-            task = store.task(task_id)
-            ctx = task.get('context') or {}
-            prev = ctx.get('next_action')
-            if not prev:
-                store.close()
-                self._error(400, 'no_checkpoint_found')
-                return
-            resume_ts = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-            evidence = list(ctx.get('evidence') or []) + [f'RESUMED@{resume_ts}']
-            store.patch_context(task_id, {
-                'next_action': None,
-                'evidence': evidence,
-            }, task['revision'])
+            result = resume(store, task_id)
+            self._send_json(result)
+        except Conflict:
+            self._error(400, 'no_checkpoint_found_or_stale')
+        except Denied:
+            self._send_json({'ok': False, 'resumed': False, 'status': 'ACTION_REQUIRED'})
+        except Exception:
+            self._error(500, 'checkpoint_resume_failed')
+        finally:
             store.close()
-            self._send_json({
-                'ok': True, 'task_id': task_id,
-                'resumed': True, 'resumed_at': resume_ts,
-                'previous_checkpoint': prev,
-                'duplicate_action': False,
-            })
-        except Exception as exc:
-            self._error(500, str(exc))
 
     def _handle_github_status(self):
         """GET /api/github/status — read-only GitHub status via git CLI."""

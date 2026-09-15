@@ -1,5 +1,14 @@
 # Zamal AI Operator — Master Architecture Decisions
 
+## Current Step 5 authority
+
+[Step 5 acceptance evidence](STEP5_ACCEPTANCE_EVIDENCE.md) supersedes historical
+roadmap, checkpoint and status-display descriptions below. Step 4 is foundation
+complete; live CV/job/profile work remains deferred and AIApply remains removed.
+Checkpoint resume now requires its recorded session to pass a fresh probe, and
+pending checkpoints block action execution. Configured credentials or reachable
+services alone are not LIVE_VERIFIED provider inference.
+
 ## 1. Project Purpose and Guiding Principles
 
 Zamal AI Operator is a local, autonomous agent system that understands, plans, executes, and verifies tasks on behalf of the owner (Jamal). The Operator is the single source of truth for all orchestration — it routes work to the best AI provider, enforces safety and approval gates, and maintains a complete audit trail.
@@ -298,7 +307,7 @@ Browser-based AI providers (ChatGPT, Claude, Gemini, DeepSeek, Qwen, Kimi) start
 
 ### Gate A — n8n Original Account Restored (2026-09-15)
 
-n8n was incorrectly running from `zamal-ai-operator-backup/node_modules` with no `N8N_USER_FOLDER` set, causing it to fall back to `~/.n8n` (account: `zamal@operator.local`, 3 workflows). The original database is at `zamal-ai-operator-backup-20260913-164656/.n8n-data/.n8n/database.sqlite` (account: `zamalahmed006@gmail.com`, 11 workflows). Restart command uses `N8N_USER_FOLDER` pointing at the backup data folder with Node 22 via nvm. Session verified by owner login.
+n8n was incorrectly running from `zamal-ai-operator-backup/node_modules` with no `N8N_USER_FOLDER` set, causing it to fall back to `~/.n8n` (account: `[account identity omitted]`, 3 workflows). The original database is at `zamal-ai-operator-backup-20260913-164656/.n8n-data/.n8n/database.sqlite` (account: `[account identity omitted]`, 11 workflows). Restart command uses `N8N_USER_FOLDER` pointing at the backup data folder with Node 22 via nvm. Session verified by owner login.
 
 ### Gate C — AI Provider Health: LIVE_VERIFIED (2026-09-15)
 

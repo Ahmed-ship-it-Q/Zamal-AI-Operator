@@ -49,7 +49,7 @@ STATES = {
 CONTEXT_FIELDS = frozenset({
     'inputs', 'rules', 'decisions', 'plan', 'selected_ai_tool', 'affected_files',
     'git_state', 'test_results', 'errors', 'retries', 'final_result', 'next_action',
-    'scope', 'restrictions', 'evidence',
+    'scope', 'restrictions', 'evidence', 'checkpoint',
 })
 DEFAULT_CONTEXT = {
     'inputs': [], 'rules': [], 'decisions': [], 'plan': [], 'selected_ai_tool': None,
@@ -573,6 +573,8 @@ class Gate:
             if binding != action['binding']:
                 raise Denied('Action payload integrity failure')
             task = s._row('tasks', action['task_id'])
+            if (json.loads(task['context']).get('checkpoint') or {}).get('pending'):
+                raise Denied('Task checkpoint requires recovery before execution')
             if protected:
                 a = action['approval']
                 if not a or a['status'] != 'APPROVED' or a['binding'] != binding or a['expires'] <= time.time() or not a['actor'] or a['decided'] is None or task['state'] != 'APPROVED':

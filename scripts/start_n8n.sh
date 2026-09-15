@@ -12,7 +12,7 @@ fi
 # Node 22 required by n8n 2.33.0
 nvm use 22
 
-# Verified original database: zamalahmed006@gmail.com, 11 workflows
+# Verified original database: [account identity omitted], 11 workflows
 # located in the backup directory (project node_modules live there too).
 N8N_BIN="$HOME/zamal-ai-operator-backup-20260913-164656/node_modules/.bin/n8n"
 export N8N_USER_FOLDER="$HOME/zamal-ai-operator-backup-20260913-164656/.n8n-data"

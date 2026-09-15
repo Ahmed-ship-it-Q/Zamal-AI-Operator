@@ -1,5 +1,18 @@
 # Roadmap state — 2026-09-09
 
+## Current Step 5 scope — 2026-09-15
+
+[Step 5 acceptance evidence](../docs/STEP5_ACCEPTANCE_EVIDENCE.md) supersedes
+historical closure counts and live-health claims for this delivery. Step 4 is
+**FOUNDATION/STRUCTURE COMPLETE**. CV editing, LinkedIn optimization, live
+LinkedIn/Qatar Living matching and applications are deferred; AIApply remains
+removed. Recovery now persists a single notification claim and checks the bound
+session before clearing the same task's checkpoint. Pending checkpoints block
+execution. Telegram and browser I/O are stubbed in automated acceptance tests.
+The original n8n service is healthy with 11 workflows. Current Claude session
+probe: SESSION_REQUIRED. Delivery requires green CI for the exact pushed SHA.
+
+
 GREEN = verified complete. RED = pending or blocked; not a claim of functionality.
 
 **Current run: Phase 4 GREEN — real Gemini handoff verified; focused 62/62 PASS; escalated full regression 762/762 PASS (one run, 103.022s).**

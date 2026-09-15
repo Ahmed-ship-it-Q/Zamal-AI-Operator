@@ -21,6 +21,7 @@ __pycache__/
 *.pyo
 
 # Databases
+/:memory:
 *.sqlite3
 *.sqlite
 *.db
