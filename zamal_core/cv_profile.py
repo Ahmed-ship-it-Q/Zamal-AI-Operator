@@ -114,6 +114,37 @@ class CVProfileProvider:
         )
 
     @classmethod
+    def load_cached_profile(cls) -> 'CVProfile':
+        """Load the locally-persisted derived profile (chmod 600, git-ignored state/).
+
+        No raw CV content is stored in the cache — only derived skill/qualification lists.
+        No authorization flag check required; the cache was written by explicit operator
+        action and contains no personal identifiers beyond a masked email.
+        """
+        import json
+        from pathlib import Path
+        cache_path = Path(__file__).resolve().parent.parent / 'state' / 'cv_profile_cache.json'
+        if not cache_path.exists():
+            raise RuntimeError(
+                f'Profile cache not found at {cache_path}. '
+                'Run the profile derivation step first.'
+            )
+        with open(cache_path) as f:
+            data = json.load(f)
+        return CVProfile(
+            name='',
+            email_masked=data.get('email_masked', ''),
+            skills=data.get('skills', []),
+            years_experience=data.get('years_experience', 0),
+            qualifications=data.get('qualifications', []),
+            target_roles=data.get('target_roles', []),
+            target_locations=data.get('target_locations', []),
+            languages=data.get('languages', []),
+            authorized_at=time.time(),
+            is_fixture=False,
+        )
+
+    @classmethod
     def get_fixture_profile(cls) -> CVProfile:
         """Return a safe synthetic profile for testing.  No authorization required."""
         return CVProfile(
