@@ -108,10 +108,134 @@ class ChannelAdapter:
     CHANNELS = frozenset({'telegram', 'gmail', 'calendar', 'whatsapp',
                           'facebook', 'messenger', 'instagram'})
 
-    def __init__(self):
+    def __init__(self, *, persistent: bool = False):
         self._lock = threading.Lock()
         self._executed: set = set()   # proposal_ids already executed (idempotency)
         self._proposals: dict = {}    # proposal_id → ActionProposal (in-memory registry)
+        self._persistent = bool(persistent)
+        if self._persistent:
+            self._migrate_persistence()
+            self._load_persisted()
+
+    def _with_store(self):
+        from .store import Store
+        return Store()
+
+    def _migrate_persistence(self):
+        store = self._with_store()
+        try:
+            with store.transaction():
+                store.db.execute('''CREATE TABLE IF NOT EXISTS channel_proposals (
+                    proposal_id TEXT PRIMARY KEY,
+                    approval_id TEXT NOT NULL UNIQUE,
+                    channel TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    destination TEXT NOT NULL,
+                    preview TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    executor_result TEXT NOT NULL,
+                    created REAL NOT NULL,
+                    approved_update_id INTEGER UNIQUE,
+                    approved_actor TEXT
+                )''')
+        finally:
+            store.close()
+
+    @staticmethod
+    def _proposal_from_row(row) -> ActionProposal:
+        return ActionProposal(
+            proposal_id=row['proposal_id'], approval_id=row['approval_id'],
+            channel=row['channel'], action=row['action'], destination=row['destination'],
+            preview=row['preview'], task_id=row['task_id'], payload=json.loads(row['payload']),
+            timestamp=row['created'], status=row['status'],
+            executor_result=json.loads(row['executor_result']),
+        )
+
+    def _load_persisted(self):
+        store = self._with_store()
+        try:
+            rows = store.db.execute('SELECT * FROM channel_proposals').fetchall()
+            for row in rows:
+                proposal = self._proposal_from_row(row)
+                self._proposals[proposal.proposal_id] = proposal
+                if proposal.status in ('EXECUTING', 'COMPLETED', 'REJECTED'):
+                    self._executed.add(proposal.proposal_id)
+        finally:
+            store.close()
+
+    def register_existing(self, proposal: ActionProposal):
+        """Persist an already-issued proposal without generating a replacement."""
+        if not self._persistent:
+            raise ValueError('persistent adapter required')
+        store = self._with_store()
+        try:
+            row = store.db.execute(
+                'SELECT * FROM channel_proposals WHERE proposal_id=?',
+                (proposal.proposal_id,),
+            ).fetchone()
+            if row:
+                existing = self._proposal_from_row(row)
+                if existing != proposal:
+                    raise ValueError('existing proposal binding mismatch')
+                return existing
+            with store.transaction():
+                store.db.execute(
+                    'INSERT INTO channel_proposals VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (proposal.proposal_id, proposal.approval_id, proposal.channel,
+                     proposal.action, proposal.destination, proposal.preview,
+                     proposal.task_id, json.dumps(proposal.payload, sort_keys=True),
+                     proposal.status, json.dumps(proposal.executor_result, sort_keys=True),
+                     proposal.timestamp, None, None),
+                )
+            with self._lock:
+                self._proposals[proposal.proposal_id] = proposal
+            return proposal
+        finally:
+            store.close()
+
+    def _persist_new(self, proposal: ActionProposal):
+        if self._persistent:
+            self.register_existing(proposal)
+
+    def _persist_status(self, proposal: ActionProposal, *, update_id=None, actor=None):
+        if not self._persistent:
+            return
+        store = self._with_store()
+        try:
+            with store.transaction():
+                values = [proposal.status, json.dumps(proposal.executor_result, sort_keys=True)]
+                sql = 'UPDATE channel_proposals SET status=?,executor_result=?'
+                if update_id is not None:
+                    sql += ',approved_update_id=?,approved_actor=?'
+                    values.extend([int(update_id), actor])
+                sql += ' WHERE proposal_id=?'
+                values.append(proposal.proposal_id)
+                store.db.execute(sql, tuple(values))
+        finally:
+            store.close()
+
+    def _claim_execution(self, proposal: ActionProposal, *, update_id=None, actor=None):
+        if self._persistent:
+            store = self._with_store()
+            try:
+                with store.transaction():
+                    changed = store.db.execute(
+                        '''UPDATE channel_proposals
+                           SET status='EXECUTING',approved_update_id=?,approved_actor=?
+                           WHERE proposal_id=? AND approval_id=? AND status='PENDING' ''',
+                        (update_id, actor, proposal.proposal_id, proposal.approval_id),
+                    ).rowcount
+                if changed != 1:
+                    return False
+            finally:
+                store.close()
+        with self._lock:
+            if proposal.proposal_id in self._executed:
+                return False
+            self._executed.add(proposal.proposal_id)
+        return True
 
     # ── Read operations ────────────────────────────────────────────────────
 
@@ -200,6 +324,7 @@ class ChannelAdapter:
         )
         with self._lock:
             self._proposals[proposal_id] = proposal
+        self._persist_new(proposal)
         return proposal
 
     def search(self, channel: str, query: str, *, limit: int = 10,
@@ -349,32 +474,28 @@ class ChannelAdapter:
     # ── Execution (post-approval) ──────────────────────────────────────────
 
     def execute_approved(self, proposal: ActionProposal,
-                         approval_id: str, actor: str) -> dict:
+                         approval_id: str, actor: str, *, update_id=None) -> dict:
         """Execute an approved proposal exactly once."""
         # Emergency Stop check
         stop = _get_emergency_stop()
         if stop.get('stop_everything') or stop.get('pause_external_actions'):
             return {'ok': False, 'error': 'emergency_stop_active'}
 
-        # Idempotency
         with self._lock:
             if proposal.proposal_id in self._executed:
                 return {'ok': False, 'error': 'already_executed'}
-            self._executed.add(proposal.proposal_id)
 
         # Verify approval_id matches
         if proposal.approval_id and proposal.approval_id != approval_id:
-            with self._lock:
-                self._executed.discard(proposal.proposal_id)
             return {'ok': False, 'error': 'approval_id_mismatch'}
 
         # Verify proposal status is not already REJECTED
         if proposal.status == 'REJECTED':
-            with self._lock:
-                self._executed.discard(proposal.proposal_id)
             return {'ok': False, 'error': 'proposal_rejected'}
 
         try:
+            if not self._claim_execution(proposal, update_id=update_id, actor=actor):
+                return {'ok': False, 'error': 'already_executed'}
             proposal.status = 'EXECUTING'
             with self._lock:
                 if proposal.proposal_id in self._proposals:
@@ -390,15 +511,95 @@ class ChannelAdapter:
                     p = self._proposals[proposal.proposal_id]
                     p.status = final_status
                     p.executor_result = proposal.executor_result
-            return {'ok': True, 'result': result, 'proposal_id': proposal.proposal_id,
+            self._persist_status(proposal)
+            return {'ok': exec_ok, 'result': result, 'proposal_id': proposal.proposal_id,
                     'approval_id': approval_id, 'actor': actor, 'status': final_status}
         except Exception as exc:
             proposal.status = 'FAILED'
             with self._lock:
                 if proposal.proposal_id in self._proposals:
                     self._proposals[proposal.proposal_id].status = 'FAILED'
-                self._executed.discard(proposal.proposal_id)
+            self._persist_status(proposal)
             return {'ok': False, 'error': str(exc)[:300]}
+
+    def execute_telegram_approval(self, proposal_id: str, *, actor: str,
+                                  update_id: int) -> dict:
+        """Bind one authorized Telegram update to one exact channel proposal."""
+        proposal = self.get_proposal(proposal_id)
+        if proposal is None:
+            return {'ok': False, 'error': 'proposal_not_found'}
+        return self.execute_approved(proposal, proposal.approval_id, actor,
+                                     update_id=update_id)
+
+    def resume_safe_approved_failure(self, proposal_id: str, *, actor: str,
+                                     update_id: int) -> dict:
+        """Retry only a proven pre-compose failure for the same approval update."""
+        if not self._persistent:
+            return {'ok': False, 'error': 'persistent_adapter_required'}
+        proposal = self.get_proposal(proposal_id)
+        safe_errors = {'no_exact_test_contact', 'wrong_target_chat',
+                       'contact_nav_failed', 'contact_nav_parse_error'}
+        if (proposal is None or proposal.status != 'FAILED'
+                or proposal.executor_result.get('error') not in safe_errors):
+            return {'ok': False, 'error': 'failure_not_safe_to_retry'}
+        store = self._with_store()
+        try:
+            with store.transaction():
+                changed = store.db.execute(
+                    '''UPDATE channel_proposals SET status='PENDING',executor_result='{}'
+                       WHERE proposal_id=? AND approval_id=? AND status='FAILED'
+                         AND approved_update_id=? AND approved_actor=?''',
+                    (proposal.proposal_id, proposal.approval_id,
+                     int(update_id), actor),
+                ).rowcount
+            if changed != 1:
+                return {'ok': False, 'error': 'approval_binding_mismatch'}
+        finally:
+            store.close()
+        with self._lock:
+            proposal.status = 'PENDING'
+            proposal.executor_result = {}
+            self._executed.discard(proposal.proposal_id)
+        return self.execute_telegram_approval(
+            proposal.proposal_id, actor=actor, update_id=update_id)
+
+    def reconcile_visible_delivery(self, proposal_id: str, *, actor: str,
+                                   target_verified: bool,
+                                   exact_outbound_count: int) -> dict:
+        """Record a visibly proven send after the send-click verifier failed."""
+        proposal = self.get_proposal(proposal_id)
+        if (not self._persistent or proposal is None or proposal.status != 'FAILED'
+                or proposal.executor_result.get('error') != 'send_not_visibly_verified'):
+            return {'ok': False, 'error': 'proposal_not_reconcilable'}
+        if target_verified is not True or exact_outbound_count != 1:
+            return {'ok': False, 'error': 'delivery_not_exactly_once'}
+        result = {'ok': True, 'stage': 'sent', 'verified_in_dom': True,
+                  'target_verified': True, 'exact_outbound_count': 1,
+                  'reconciled_without_resend': True}
+        store = self._with_store()
+        try:
+            with store.transaction():
+                changed = store.db.execute(
+                    '''UPDATE channel_proposals SET status='COMPLETED',executor_result=?
+                       WHERE proposal_id=? AND approval_id=? AND status='FAILED' ''',
+                    (json.dumps(result, sort_keys=True), proposal.proposal_id,
+                     proposal.approval_id),
+                ).rowcount
+            if changed != 1:
+                return {'ok': False, 'error': 'proposal_reconcile_conflict'}
+        finally:
+            store.close()
+        with self._lock:
+            proposal.status = 'COMPLETED'
+            proposal.executor_result = result
+            self._executed.add(proposal.proposal_id)
+        return {'ok': True, 'status': 'COMPLETED', 'proposal_id': proposal_id,
+                'actor': actor, 'result': result}
+
+    def proposal_for_approval(self, approval_id: str):
+        with self._lock:
+            return next((p for p in self._proposals.values()
+                         if p.approval_id == approval_id), None)
 
     def execute_rejected(self, proposal: ActionProposal, actor: str) -> dict:
         """Record rejection. Guarantees zero external action.
@@ -410,6 +611,7 @@ class ChannelAdapter:
             self._executed.add(proposal.proposal_id)
             if proposal.proposal_id in self._proposals:
                 self._proposals[proposal.proposal_id].status = 'REJECTED'
+        self._persist_status(proposal)
         return {'ok': True, 'action': 'rejected', 'proposal_id': proposal.proposal_id,
                 'actor': actor, 'external_action': 'none'}
 
@@ -1526,6 +1728,11 @@ def _exec_whatsapp_send(payload: dict) -> dict:
     from .ai_browser_transport import _exec_js_in_domain
 
     content = payload.get('content', '')
+    destination = payload.get('raw_destination') or payload.get('destination', '')
+    if destination != 'Jamal BD Number':
+        return {'ok': False, 'error': 'unauthorized_test_destination'}
+    if not content:
+        return {'ok': False, 'error': 'empty_message'}
 
     # Step 1: Navigate to test contact via main sidebar search
     js_search = '''(function(){
@@ -1534,26 +1741,24 @@ def _exec_whatsapp_send(payload: dict) -> dict:
       if(!inp) return JSON.stringify({ok:false,error:'no_search_input'});
       inp.focus();
       var niv = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
-      niv.call(inp, 'Jamal BD Number');
+      niv.call(inp, %s);
       inp.dispatchEvent(new Event('input',{bubbles:true}));
       inp.dispatchEvent(new Event('change',{bubbles:true}));
       return JSON.stringify({ok:true,stage:'search_triggered'});
-    })()'''
+    })()''' % json.dumps(destination)
     ok1, out1 = _exec_js_in_domain('web.whatsapp.com', js_search, timeout=8)
     _t.sleep(1.5)
 
     # Step 2: Click the first matching conversation using full mouse event sequence
     js_click = '''(function(){
-      var items = Array.from(document.querySelectorAll('[data-testid="cell-frame-container"]'));
-      var target = items.find(function(el){
-        return el.textContent.toLowerCase().includes('jamal bd');
-      });
-      if(!target) return JSON.stringify({ok:false,error:'no_test_contact',count:items.length,texts:items.slice(0,3).map(e=>e.textContent.slice(0,40))});
+      var label = document.querySelector('[title=%s]');
+      var target = label && label.closest('[data-testid="cell-frame-container"]');
+      if(!target) return JSON.stringify({ok:false,error:'no_exact_test_contact'});
       target.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true}));
       target.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true}));
       target.click();
       return JSON.stringify({ok:true,stage:'test_contact_selected'});
-    })()'''
+    })()''' % json.dumps(destination)
     ok2, out2 = _exec_js_in_domain('web.whatsapp.com', js_click, timeout=8)
     _t.sleep(4.0)  # WA Business needs extra time to render conversation panel
     try:
@@ -1562,6 +1767,29 @@ def _exec_whatsapp_send(payload: dict) -> dict:
             return {'ok': False, 'error': r2.get('error', 'contact_nav_failed'), 'raw': out2[:120]}
     except Exception:
         return {'ok': False, 'error': 'contact_nav_parse_error'}
+
+    # Confirm the selected chat by its exact header title, then count only exact
+    # matching outbound messages. No surrounding message text is returned.
+    js_preflight = f'''(function(){{
+      var main = document.querySelector('#main');
+      if(!main) return JSON.stringify({{ok:false,target_verified:false}});
+      var mainRect = main.getBoundingClientRect();
+      var selected = Array.from(document.querySelectorAll('#main header span'))
+        .some(function(el){{ return (el.textContent||'').trim() === {json.dumps(destination)}; }});
+      var matches = Array.from(document.querySelectorAll('#main [data-testid="selectable-text"]'))
+        .filter(function(el){{ var r=el.getBoundingClientRect();
+          return (el.textContent||'').trim() === {json.dumps(content)} &&
+            (r.left+r.width/2) > (mainRect.left+mainRect.width/2); }}).length;
+      return JSON.stringify({{ok:selected,target_verified:selected,exact_outbound_before:matches}});
+    }})()'''
+    ok_pre, out_pre = _exec_js_in_domain('web.whatsapp.com', js_preflight, timeout=8)
+    try:
+        preflight = json.loads(out_pre or '{}')
+        if not ok_pre or not preflight.get('target_verified'):
+            return {'ok': False, 'error': 'wrong_target_chat'}
+        outbound_before = int(preflight.get('exact_outbound_before', 0))
+    except Exception:
+        return {'ok': False, 'error': 'target_preflight_parse_error'}
 
     # Step 3: Fill compose (select-all + insertText)
     js_fill = f'''(function(){{
@@ -1599,21 +1827,33 @@ def _exec_whatsapp_send(payload: dict) -> dict:
     ok4, out4 = _exec_js_in_domain('web.whatsapp.com', js_send, timeout=8)
     _t.sleep(2.0)
 
-    # Step 5: Verify message in chat DOM
+    # Step 5: Verify one new exact outbound message in the selected chat.
     js_verify = f'''(function(){{
-      var snippet = {json.dumps(content[:40])};
-      var msgs = Array.from(document.querySelectorAll('[data-testid="msg-container"]'));
-      var found = msgs.some(function(m){{ return m.textContent.includes(snippet); }});
-      return JSON.stringify({{ok:found,msg_count:msgs.length,verified_in_dom:found}});
+      var main = document.querySelector('#main');
+      if(!main) return JSON.stringify({{ok:false,target_verified:false}});
+      var mainRect = main.getBoundingClientRect();
+      var selected = Array.from(document.querySelectorAll('#main header span'))
+        .some(function(el){{ return (el.textContent||'').trim() === {json.dumps(destination)}; }});
+      var matches = Array.from(document.querySelectorAll('#main [data-testid="selectable-text"]'))
+        .filter(function(el){{ var r=el.getBoundingClientRect();
+          return (el.textContent||'').trim() === {json.dumps(content)} &&
+            (r.left+r.width/2) > (mainRect.left+mainRect.width/2); }}).length;
+      var delta = matches - {outbound_before};
+      return JSON.stringify({{ok:selected&&delta===1,target_verified:selected,
+        exact_outbound_delta:delta,verified_in_dom:selected&&delta===1}});
     }})()'''
     ok5, out5 = _exec_js_in_domain('web.whatsapp.com', js_verify, timeout=8)
 
     try:
         send_r = json.loads(out4 or '{}')
         verify_r = json.loads(out5 or '{}')
+        if send_r.get('stage') == 'send_clicked' and verify_r.get('verified_in_dom'):
+            return {'ok': True, 'stage': 'sent', 'verified_in_dom': True,
+                    'target_verified': True, 'exact_outbound_delta': 1}
         if send_r.get('stage') == 'send_clicked':
-            return {'ok': True, 'stage': 'sent', 'verified_in_dom': verify_r.get('verified_in_dom', False),
-                    'msg_count': verify_r.get('msg_count', 0)}
+            return {'ok': False, 'error': 'send_not_visibly_verified',
+                    'target_verified': verify_r.get('target_verified', False),
+                    'exact_outbound_delta': verify_r.get('exact_outbound_delta')}
         return {'ok': False, 'error': send_r.get('error', 'send_failed'), 'detail': send_r}
     except Exception:
         return {'ok': bool(ok4), 'raw': str(out4)[:200]}
@@ -1746,5 +1986,5 @@ def get_channel_adapter() -> ChannelAdapter:
     global _ADAPTER
     with _ADAPTER_LOCK:
         if _ADAPTER is None:
-            _ADAPTER = ChannelAdapter()
+            _ADAPTER = ChannelAdapter(persistent=True)
     return _ADAPTER

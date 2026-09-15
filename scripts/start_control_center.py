@@ -6,6 +6,6 @@ from zamal_core.control_center import ControlCenterServer
 
 if __name__ == '__main__':
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8766
-    server = ControlCenterServer(port=port)
+    server = ControlCenterServer(port=port, telegram_receiver=True)
     print(f'Control Center: http://127.0.0.1:{port}')
     server.serve()

@@ -24,6 +24,7 @@ is provided. File recording/storage is GREEN; auto-transcription is BLOCKED.
 """
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -213,6 +214,21 @@ class TelegramMessageRouter:
 
     def _text(self, chat_id, update_id, text):
         stripped = text.strip()
+        channel_approval = re.fullmatch(
+            r'APPROVE ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})',
+            stripped,
+        )
+        if channel_approval:
+            from .channel_adapter import get_channel_adapter
+            result = get_channel_adapter().execute_telegram_approval(
+                channel_approval.group(1), actor=f'telegram:{chat_id}',
+                update_id=update_id,
+            )
+            return {
+                'outcome': 'SUCCESS' if result.get('ok') else 'DENIED',
+                'choice': 'APPROVE', 'proposal_id': channel_approval.group(1),
+                **result,
+            }
         cmd_lower = stripped.lower().split()[0] if stripped else ''
         # Handle slash commands
         if cmd_lower in self._COMMANDS:
@@ -416,7 +432,7 @@ class TelegramCallbackHandler:
         self._s = store
         self._cfg = cfg  # TelegramConfig; if provided, adds defence-in-depth chat_id check
 
-    def handle(self, callback_query_id, chat_id, data):
+    def handle(self, callback_query_id, chat_id, data, update_id=None):
         # Defence-in-depth: re-verify chat_id against the operator allowlist even
         # though process_update() already checked it.  This ensures the job-app
         # approval callback boundary cannot be reached by an unauthorized sender
@@ -430,6 +446,25 @@ class TelegramCallbackHandler:
         if len(parts) != 2 or parts[1] not in _ALLOWED_CHOICES:
             return failure('DENIED', 'invalid_callback_format')
         approval_id, choice = parts[0], parts[1]
+        from .channel_adapter import get_channel_adapter
+        channel_adapter = get_channel_adapter()
+        channel_proposal = channel_adapter.proposal_for_approval(approval_id)
+        if channel_proposal is not None:
+            actor = f'telegram:{chat_id}'
+            if choice == 'APPROVE':
+                result = channel_adapter.execute_telegram_approval(
+                    channel_proposal.proposal_id, actor=actor,
+                    update_id=update_id,
+                )
+            elif choice == 'REJECT':
+                result = channel_adapter.execute_rejected(channel_proposal, actor)
+            else:
+                result = {'ok': False, 'error': 'edit_requires_new_proposal'}
+            return {
+                'outcome': 'SUCCESS' if result.get('ok') else 'DENIED',
+                'choice': choice, 'approval_id': approval_id,
+                'proposal_id': channel_proposal.proposal_id, **result,
+            }
         try:
             approval = self._s.approval(approval_id)
         except (Conflict, Denied):
@@ -518,7 +553,8 @@ class TelegramBot:
             if not self._dedup.claim(update_id, chat_id, 'callback'):
                 self._api.answer_callback(cb.get('id', ''), 'Already processed')
                 return {'outcome': 'DUPLICATE', 'update_id': update_id, 'ok': False}
-            result = self._callbacks.handle(cb.get('id', ''), chat_id, cb.get('data', ''))
+            result = self._callbacks.handle(cb.get('id', ''), chat_id,
+                                            cb.get('data', ''), update_id=update_id)
             self._dedup.record_result(update_id, result)
             ack = self._callback_ack(result)
             self._api.answer_callback(cb.get('id', ''), ack)
@@ -530,6 +566,8 @@ class TelegramBot:
         outcome = result.get('outcome', 'FAILED')
         task_id = result.get('task_id', '')
         approval_id = result.get('approval_id')
+        if result.get('proposal_id') and outcome == 'SUCCESS':
+            return
         if outcome in ('SUCCESS', 'RECORDED') and task_id:
             msg = f'Task received: `{task_id[:8]}…`'
             if approval_id:
@@ -616,12 +654,18 @@ class TelegramBot:
                 sent = True
         return sent
 
-    def poll(self, offset=0, poll_timeout=30, max_iterations=None):
+    def poll(self, offset=0, poll_timeout=30, max_iterations=None,
+             stop_event=None, start_from_latest=False):
         """Long-polling loop. max_iterations is for tests; None = forever."""
         if not self._cfg.configured:
             raise Denied('Bot not configured; set ZAMAL_TELEGRAM_TOKEN and ZAMAL_TELEGRAM_CHAT_ID')
+        if start_from_latest:
+            latest = self._api.get_updates(offset=-1, timeout=0, limit=1)
+            if latest.get('ok') and latest.get('result'):
+                offset = latest['result'][-1]['update_id'] + 1
         i = 0
-        while max_iterations is None or i < max_iterations:
+        while ((max_iterations is None or i < max_iterations)
+               and not (stop_event and stop_event.is_set())):
             from .safety import Controls
             try:
                 Controls(self._s).check('inspect')

@@ -870,15 +870,19 @@ class TestExecGmailSend(unittest.TestCase):
 class TestExecWhatsappSend(unittest.TestCase):
     @patch(_JS_PATCH)
     def test_returns_dict(self, mock_js):
-        # 5 calls: new_chat_click, self_chat_select, fill_compose, send_click, verify
+        # 6 narrow calls: search, exact contact, target preflight, fill, send, verify
         mock_js.side_effect = [
-            (True, json.dumps({'ok': True, 'stage': 'new_chat_opened'})),
-            (True, json.dumps({'ok': True, 'stage': 'self_chat_selected'})),
+            (True, json.dumps({'ok': True, 'stage': 'search_triggered'})),
+            (True, json.dumps({'ok': True, 'stage': 'test_contact_selected'})),
+            (True, json.dumps({'ok': True, 'target_verified': True,
+                               'exact_outbound_before': 0})),
             (True, json.dumps({'ok': True, 'stage': 'compose_filled', 'len': 5})),
             (True, json.dumps({'ok': True, 'stage': 'send_clicked'})),
-            (True, json.dumps({'ok': True, 'msg_count': 1, 'verified_in_dom': True})),
+            (True, json.dumps({'ok': True, 'target_verified': True,
+                               'exact_outbound_delta': 1, 'verified_in_dom': True})),
         ]
-        result = _exec_whatsapp_send({'content': 'Hello'})
+        result = _exec_whatsapp_send({
+            'destination': 'Jamal BD Number', 'content': 'Hello'})
         self.assertIsInstance(result, dict)
         self.assertTrue(result.get('ok'))
 

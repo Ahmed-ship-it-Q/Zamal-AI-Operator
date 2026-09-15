@@ -2359,9 +2359,49 @@ from .store import Gate  # noqa: E402
 # ── Server ────────────────────────────────────────────────────────────────────
 
 class ControlCenterServer:
-    def __init__(self, port=8766):
+    def __init__(self, port=8766, *, telegram_receiver=False):
         self.port = port
         self._server = None
+        self._telegram_receiver_enabled = bool(telegram_receiver)
+        self._telegram_stop = None
+        self._telegram_thread = None
+
+    def _start_telegram_receiver(self):
+        if not self._telegram_receiver_enabled or self._telegram_thread:
+            return
+        _load_auth_env()
+        from .telegram_bot import TelegramConfig
+        if not TelegramConfig().configured:
+            return
+        stop_event = threading.Event()
+
+        def receive():
+            from .store import Store
+            from .telegram_bot import TelegramBot
+            store = Store()
+            try:
+                TelegramBot(store).poll(
+                    poll_timeout=5, stop_event=stop_event,
+                    start_from_latest=True,
+                )
+            finally:
+                store.close()
+
+        thread = threading.Thread(
+            target=receive,
+            daemon=True,
+            name='zamal-telegram-receiver',
+        )
+        self._telegram_stop = stop_event
+        self._telegram_thread = thread
+        thread.start()
+
+    def _stop_telegram_receiver(self):
+        if self._telegram_stop:
+            self._telegram_stop.set()
+        if self._telegram_thread:
+            self._telegram_thread.join(timeout=7)
+        self._telegram_stop = self._telegram_thread = None
 
     def _make_server(self):
         server = HTTPServer(('127.0.0.1', self.port), _Handler)
@@ -2371,12 +2411,14 @@ class ControlCenterServer:
     def serve(self, *, block=True):
         """Start serving. block=True runs forever; block=False runs in background thread."""
         self._server = self._make_server()
+        self._start_telegram_receiver()
         if block:
             try:
                 self._server.serve_forever()
             except KeyboardInterrupt:
                 pass
             finally:
+                self._stop_telegram_receiver()
                 self._server.server_close()
         else:
             t = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -2385,6 +2427,7 @@ class ControlCenterServer:
 
     def stop(self):
         if self._server:
+            self._stop_telegram_receiver()
             self._server.shutdown()
             self._server.server_close()
             self._server = None
