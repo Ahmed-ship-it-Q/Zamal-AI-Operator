@@ -89,8 +89,9 @@ class JobQuery:
 class MatchResult:
     """Output from JobMatcher.evaluate() for one job listing."""
     job_id: str
-    score: int            # 0 (rejected before scoring) or 90-99
-    accepted: bool        # True iff 90 <= score <= 99
+    score: int            # 0 (rejected before scoring) or 90-100 (CV-match score)
+    accepted: bool        # True iff 90 <= score <= 100
     rejection_reason: str # non-empty when accepted=False
     score_breakdown: dict # explainable per-component scores
     matched_keywords: list
+    recency_rank: int = 0 # ranking/tie-breaker only — never part of score

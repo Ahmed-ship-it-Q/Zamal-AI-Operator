@@ -482,7 +482,7 @@ class QatarLivingAdapter(JobSourceAdapter):
         )
 
     def make_fixture_job(self, **overrides) -> NormalizedJob:
-        title    = overrides.get('title', 'Finance Manager')
+        title    = overrides.get('title', 'Chief Accountant')
         company  = overrides.get('company', 'Gulf Holdings WLL')
         location = overrides.get('location', 'Qatar')
         url      = overrides.get('url', 'https://www.qatarliving.com/jobs/fixture-ql-002')

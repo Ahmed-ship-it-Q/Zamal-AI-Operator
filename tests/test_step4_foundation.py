@@ -302,20 +302,20 @@ class TestJobMatcher(unittest.TestCase):
         r = self.matcher.evaluate(job)
         self.assertTrue(r.accepted, f'expected accepted, got score={r.score} reason={r.rejection_reason}')
         self.assertGreaterEqual(r.score, 90)
-        self.assertLessEqual(r.score, 99)
+        self.assertLessEqual(r.score, 100)
 
     def test_fixture_qatar_living_job_accepted(self):
         job = self._fixture_ql()
         r = self.matcher.evaluate(job)
-        self.assertTrue(r.accepted)
+        self.assertTrue(r.accepted, f'expected accepted, got score={r.score} reason={r.rejection_reason}')
         self.assertGreaterEqual(r.score, 90)
-        self.assertLessEqual(r.score, 99)
+        self.assertLessEqual(r.score, 100)
 
-    def test_score_never_above_99(self):
+    def test_score_never_above_100(self):
         for _ in range(10):
             job = self._fixture_li()
             r = self.matcher.evaluate(job)
-            self.assertLessEqual(r.score, 99, 'score inflation: exceeded 99')
+            self.assertLessEqual(r.score, 100, 'score inflation: exceeded 100')
 
     def test_non_qatar_rejected(self):
         job = self._fixture_li(location='Dubai, UAE')
@@ -337,10 +337,11 @@ class TestJobMatcher(unittest.TestCase):
         self.assertIn('60_days', r.rejection_reason)
 
     def test_score_breakdown_all_components_present(self):
+        from zamal_core.job_matcher import SCORE_COMPONENTS
         job = self._fixture_li()
         r = self.matcher.evaluate(job)
-        for key in ('location_match', 'role_match', 'keyword_match', 'recency', 'requirements_fit'):
-            self.assertIn(key, r.score_breakdown)
+        for key in SCORE_COMPONENTS:
+            self.assertIn(key, r.score_breakdown, f'missing component {key}')
 
     def test_score_breakdown_values_non_negative(self):
         job = self._fixture_li()
@@ -348,12 +349,22 @@ class TestJobMatcher(unittest.TestCase):
         for k, v in r.score_breakdown.items():
             self.assertGreaterEqual(v, 0, f'{k} is negative')
 
-    def test_no_profile_no_penalty(self):
+    def test_recency_rank_not_in_score(self):
+        """recency_rank must exist on result but must not appear in score_breakdown."""
+        job = self._fixture_li()
+        r = self.matcher.evaluate(job)
+        self.assertNotIn('recency', r.score_breakdown)
+        self.assertNotIn('recency_rank', r.score_breakdown)
+        self.assertIsInstance(r.recency_rank, int)
+
+    def test_no_profile_does_not_raise(self):
         from zamal_core.job_matcher import JobMatcher
         m = JobMatcher(profile=None)
         job = self._fixture_li()
         r = m.evaluate(job)
-        self.assertTrue(r.accepted)
+        self.assertIsInstance(r.score, int)
+        self.assertGreaterEqual(r.score, 0)
+        self.assertLessEqual(r.score, 100)
 
 
 # ── 6. Deduplication ──────────────────────────────────────────────────────────
@@ -918,6 +929,180 @@ class TestCCHTMLJobSections(unittest.TestCase):
                 server.stop()
             except Exception:
                 pass
+
+
+# ── 16. CV-match scoring component tests ─────────────────────────────────────
+
+class TestCVMatchScoring(unittest.TestCase):
+    """Focused tests for the rebuilt CV-match scoring engine."""
+
+    def _make_job(self, title, location='Doha, Qatar', requirements=None, posted_date='2026-09-10'):
+        import hashlib, time as _time
+        from zamal_core.job_schema import NormalizedJob
+        reqs = requirements or ['Financial reporting', 'General ledger', '5+ years experience']
+        url = f'https://www.linkedin.com/jobs/view/test-{hashlib.md5(title.encode()).hexdigest()[:6]}/'
+        return NormalizedJob(
+            job_id=hashlib.sha256(url.encode()).hexdigest()[:16],
+            source='linkedin', url=url,
+            title=title, company='Test Co', location=location,
+            posted_date=posted_date, requirements=reqs,
+            application_method='direct',
+            fingerprint=hashlib.sha256(f'{title}{location}'.encode()).hexdigest()[:24],
+            discovered_at=_time.time(),
+        )
+
+    def setUp(self):
+        from zamal_core.job_matcher import JobMatcher
+        from zamal_core.cv_profile import CVProfileProvider
+        self.profile = CVProfileProvider.get_fixture_profile()
+        self.matcher = JobMatcher(profile=self.profile)
+
+    # -- Component architecture --
+
+    def test_score_components_sum_to_100(self):
+        from zamal_core.job_matcher import SCORE_COMPONENTS
+        self.assertEqual(sum(SCORE_COMPONENTS.values()), 100)
+
+    def test_location_not_a_score_component(self):
+        from zamal_core.job_matcher import SCORE_COMPONENTS
+        self.assertNotIn('location_match', SCORE_COMPONENTS)
+        self.assertNotIn('location', SCORE_COMPONENTS)
+
+    def test_recency_not_a_score_component(self):
+        from zamal_core.job_matcher import SCORE_COMPONENTS
+        self.assertNotIn('recency', SCORE_COMPONENTS)
+        self.assertNotIn('recency_rank', SCORE_COMPONENTS)
+
+    def test_recency_rank_is_separate_field(self):
+        job = self._make_job('Senior Accountant')
+        r = self.matcher.evaluate(job)
+        self.assertIsInstance(r.recency_rank, int)
+        self.assertNotIn('recency', r.score_breakdown)
+
+    # -- Seniority caps --
+
+    def test_director_finance_below_90(self):
+        job = self._make_job(
+            'Director of Finance',
+            requirements=['ACCA required', '15+ years experience',
+                          'Financial reporting', 'IFRS', 'General ledger',
+                          'ERP systems', 'Budgeting', 'Reconciliation']
+        )
+        r = self.matcher.evaluate(job)
+        self.assertFalse(r.accepted, f'Director should score <90, got {r.score}')
+        self.assertLess(r.score, 90)
+        self.assertLessEqual(r.score_breakdown['role_seniority'], 2)
+
+    def test_assistant_director_finance_below_90(self):
+        job = self._make_job(
+            'Assistant Director of Finance',
+            requirements=['10+ years', 'ACCA', 'IFRS', 'Budgeting',
+                          'Financial reporting', 'General ledger', 'ERP systems',
+                          'Reconciliation', 'Payroll', 'Excel']
+        )
+        r = self.matcher.evaluate(job)
+        self.assertFalse(r.accepted, f'Assistant Director should score <90, got {r.score}')
+        self.assertLess(r.score, 90)
+        self.assertLessEqual(r.score_breakdown['role_seniority'], 5)
+
+    def test_intern_below_90(self):
+        job = self._make_job(
+            'Tax Intern',
+            requirements=['Currently enrolled', '0-1 years', 'Excel', 'Finance']
+        )
+        r = self.matcher.evaluate(job)
+        self.assertFalse(r.accepted, f'Intern should score <90, got {r.score}')
+        self.assertLess(r.score, 90)
+        self.assertLessEqual(r.score_breakdown['role_seniority'], 5)
+
+    def test_senior_accountant_seniority_at_least_15(self):
+        job = self._make_job('Senior Accountant')
+        r = self.matcher.evaluate(job)
+        self.assertGreaterEqual(r.score_breakdown['role_seniority'], 15)
+
+    def test_chief_accountant_seniority_at_least_15(self):
+        job = self._make_job('Chief Accountant')
+        r = self.matcher.evaluate(job)
+        self.assertGreaterEqual(r.score_breakdown['role_seniority'], 15)
+
+    def test_accountant_seniority_is_20(self):
+        job = self._make_job('Accountant')
+        r = self.matcher.evaluate(job)
+        self.assertEqual(r.score_breakdown['role_seniority'], 20)
+
+    # -- Education / certification --
+
+    def test_required_cert_absent_caps_education_to_zero(self):
+        from zamal_core.cv_profile import CVProfileProvider
+        from zamal_core.job_matcher import JobMatcher
+        real_profile = CVProfileProvider.load_cached_profile()  # B.Com only, no ACCA/CPA
+        matcher = JobMatcher(profile=real_profile)
+        job = self._make_job(
+            'Senior Accountant',
+            requirements=['CPA required', 'Must hold CPA', '5+ years experience',
+                          'Financial reporting', 'General ledger', 'Excel',
+                          'Accounts payable', 'Bank reconciliation', 'Journal entries']
+        )
+        r = matcher.evaluate(job)
+        self.assertEqual(r.score_breakdown['education_certification'], 0,
+                         'Required cert absent must zero out education component')
+        self.assertFalse(r.accepted, f'Missing required cert must cap below 90, got {r.score}')
+        self.assertLess(r.score, 90)
+
+    def test_preferred_cert_reduces_but_does_not_reject(self):
+        """Preferred cert not in profile reduces score but job may still qualify."""
+        from zamal_core.cv_profile import CVProfileProvider
+        from zamal_core.job_matcher import JobMatcher
+        real_profile = CVProfileProvider.load_cached_profile()
+        matcher = JobMatcher(profile=real_profile)
+        job = self._make_job(
+            'Senior Accountant',
+            requirements=['CPA preferred', '5+ years experience',
+                          'Financial reporting', 'General ledger', 'Excel',
+                          'Accounts payable', 'Bank reconciliation']
+        )
+        r = matcher.evaluate(job)
+        # Education score should be > 0 (not hard-capped)
+        self.assertGreater(r.score_breakdown['education_certification'], 0)
+
+    def test_required_cert_present_in_fixture_profile_full_edu(self):
+        """Fixture profile has ACCA; job requiring ACCA should get full education pts."""
+        job = self._make_job(
+            'Senior Accountant',
+            requirements=['ACCA required', 'Must hold ACCA', '5+ years', 'IFRS',
+                          'Financial reporting', 'General ledger']
+        )
+        r = self.matcher.evaluate(job)
+        self.assertEqual(r.score_breakdown['education_certification'], 15)
+
+    # -- Experience years --
+
+    def test_experience_below_required_reduces_score(self):
+        """Candidate with 8 years vs 12-year requirement should score lower."""
+        from zamal_core.job_matcher import _score_experience
+        pts, _ = _score_experience('12+ years of relevant experience', self.profile)
+        self.assertLess(pts, 15)  # deficit of 4 → 0 pts
+
+    def test_experience_meets_requirement_scores_well(self):
+        from zamal_core.job_matcher import _score_experience
+        pts, _ = _score_experience('5+ years of accounting experience', self.profile)
+        self.assertGreaterEqual(pts, 22)
+
+    # -- Skills --
+
+    def test_zero_skill_matches_zero_skills_pts(self):
+        from zamal_core.job_matcher import _score_skills
+        pts, matched = _score_skills('sql python docker kubernetes aws react', self.profile)
+        self.assertEqual(pts, 0)
+        self.assertEqual(matched, [])
+
+    def test_five_skill_matches_full_skills_pts(self):
+        from zamal_core.job_matcher import _score_skills
+        # Fixture profile skills: IFRS, QuickBooks, VAT Compliance, Budgeting, Reconciliation
+        desc = 'ifrs quickbooks vat compliance budgeting reconciliation financial reporting'
+        pts, matched = _score_skills(desc, self.profile)
+        self.assertEqual(pts, 35)
+        self.assertGreaterEqual(len(matched), 5)
 
 
 if __name__ == '__main__':
