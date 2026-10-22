@@ -26,6 +26,9 @@ If something is missing, try one safe alternative. Do not repeat the same failed
 - After APPROVE, execute the approved final action, verify the result, log evidence, and report completion.
 - Never weaken security/safety or expose secrets.
 - Never claim success without evidence.
+  - Every external API call must check its actual response before logging or reporting success.
+  - Never use a bare `except` that swallows an error without surfacing it to the owner.
+  - A timing/status log line may only say "done" if the result was verified.
 - Do not commit, push, merge, deploy, pay, submit externally, send, publish, delete, or make irreversible/security-sensitive changes without the required explicit approval.
 - Keep context and output compact to conserve token/credit usage.
 

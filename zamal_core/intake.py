@@ -1,20 +1,111 @@
 """Phase 5: Universal input intake — screenshots, images, documents, URLs, voice.
 
-All evidence is recorded as task context data, never executed or interpreted
-as commands. File content, URLs, voice transcripts and embedded text never
-grant approval, bypass the gate, or affect CPC project state.
+All evidence is recorded as task context data. Intake never executes it or
+grants approval. An authorized Telegram router may later parse a voice
+transcript into a separate proposal; the proposal still requires exact approval.
 """
 import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 from .store import Store
+
+_TIMING_LOG = Path(__file__).resolve().parent.parent / 'logs' / 'timing.log'
+
+def _tlog(msg):
+    ts = time.strftime('%Y-%m-%d %H:%M:%S')
+    line = f'{ts} [TIMING] {msg}\n'
+    try:
+        with open(_TIMING_LOG, 'a') as _f:
+            _f.write(line)
+    except OSError:
+        pass
+
+_DAEMON_BIN = (Path(__file__).resolve().parent.parent
+               / 'state' / 'tools' / 'whisper_daemon')
+
+class _WhisperDaemon:
+    """Persistent subprocess that holds the ggml model in memory."""
+
+    _READY_MARKER = 'ready'
+    _STARTUP_TIMEOUT = 30  # seconds to wait for model load
+
+    def __init__(self, model: str):
+        self._model = model
+        self._proc: subprocess.Popen | None = None
+        self._lock = threading.Lock()
+
+    def start(self) -> bool:
+        if not _DAEMON_BIN.is_file():
+            return False
+        try:
+            self._proc = subprocess.Popen(
+                [str(_DAEMON_BIN), self._model],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, bufsize=0)
+        except OSError:
+            return False
+        # Drain whisper.cpp init noise; wait for our "ready\n" sentinel
+        import select
+        deadline = time.monotonic() + self._STARTUP_TIMEOUT
+        while time.monotonic() < deadline:
+            r, _, _ = select.select([self._proc.stderr], [], [], 1.0)
+            if not r:
+                if self._proc.poll() is not None:
+                    return False
+                continue
+            line = self._proc.stderr.readline().decode('utf-8', 'replace').strip()
+            if line == self._READY_MARKER:
+                return True
+            if self._proc.poll() is not None:
+                return False
+        return False
+
+    def alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def transcribe(self, wav_path: Path, offset_ms: int, duration_ms: int) -> str | None:
+        with self._lock:
+            if not self.alive():
+                return None
+            req = json.dumps({'wav': str(wav_path),
+                              'offset_ms': offset_ms,
+                              'duration_ms': duration_ms})
+            try:
+                self._proc.stdin.write((req + '\n').encode())
+                self._proc.stdin.flush()
+                line = self._proc.stdout.readline()
+                if not line:
+                    return None
+                d = json.loads(line)
+                return d.get('text', '').strip() if 'text' in d else None
+            except (OSError, json.JSONDecodeError):
+                return None
+
+
+_daemon_registry: dict[str, _WhisperDaemon] = {}
+_daemon_registry_lock = threading.Lock()
+
+
+def _get_daemon(model: str) -> _WhisperDaemon | None:
+    with _daemon_registry_lock:
+        d = _daemon_registry.get(model)
+        if d and d.alive():
+            return d
+        d = _WhisperDaemon(model)
+        if not d.start():
+            return None
+        _daemon_registry[model] = d
+        return d
+
 
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
@@ -31,7 +122,7 @@ SUPPORTED_DOCUMENTS = frozenset({
     '.txt', '.log', '.csv', '.md', '.json', '.yaml', '.yml',
 })
 SUPPORTED_AUDIO = frozenset({
-    '.wav', '.m4a', '.mp3', '.aiff', '.aac', '.ogg', '.flac',
+    '.wav', '.m4a', '.mp3', '.aiff', '.aac', '.ogg', '.oga', '.flac',
 })
 
 _URL_RE = re.compile(r'^https?://.', re.I)
@@ -204,13 +295,195 @@ def normalize_issue(text: str) -> dict:
 # ---------------------------------------------------------------------------
 
 class SttResult:
-    def __init__(self, *, transcript=None, pending=False, error=None):
+    def __init__(self, *, transcript=None, pending=False, error=None,
+                 low_confidence=False, duration_secs=0.0, detected_lang='auto'):
         self.transcript = transcript
         self.pending = pending
         self.error = error
+        self.low_confidence = low_confidence
+        self.duration_secs = duration_secs
+        self.detected_lang = detected_lang
 
     def as_dict(self) -> dict:
-        return {'transcript': self.transcript, 'pending': self.pending, 'error': self.error}
+        return {'transcript': self.transcript, 'pending': self.pending,
+                'error': self.error, 'low_confidence': self.low_confidence,
+                'duration_secs': self.duration_secs, 'detected_lang': self.detected_lang}
+
+
+# ── Whisper chunking constants ─────────────────────────────────────────────────
+_CHUNK_SECS = 55          # process 55 s at a time; overlaps avoided via offsets
+_CHUNK_TIMEOUT = 180      # seconds per chunk (generous for slow x86)
+_FFMPEG_PROBE_TIMEOUT = 15
+_MAX_CHUNKS = 6           # 6 × 55 s = 330 s ≈ 5.5 min (covers 5-min Bot API limit)
+_LOW_CONF_WPM = 3         # below this words-per-minute → flag low confidence
+_BLANK_MARKERS = frozenset({'[BLANK_AUDIO]', '(BLANK_AUDIO)', '[NOISE]',
+                             '(SILENCE)', '[SILENCE]', '(MUSIC)', '[MUSIC]'})
+
+
+def _probe_duration(ffmpeg: str, wav_path: Path) -> float:
+    """Return WAV duration in seconds using ffmpeg stderr output."""
+    try:
+        r = subprocess.run(
+            [ffmpeg, '-i', str(wav_path), '-hide_banner'],
+            stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            timeout=_FFMPEG_PROBE_TIMEOUT, check=False)
+        m = re.search(r'Duration:\s*(\d+):(\d+):([\d.]+)',
+                      r.stderr.decode('utf-8', 'replace'))
+        if m:
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    except Exception:
+        pass
+    return 0.0
+
+
+def _run_whisper_chunk_cli(cli: str, model: Path, wav_path: Path,
+                           offset_ms: int, duration_ms: int, out_stem: Path) -> str:
+    """Fallback: run whisper-cli subprocess (loads model fresh every call)."""
+    args = [cli, '-m', str(model), '-f', str(wav_path),
+            '-l', 'auto', '-otxt', '-of', str(out_stem), '-np',
+            '-ot', str(offset_ms)]
+    if duration_ms > 0:
+        args += ['-d', str(duration_ms)]
+    try:
+        r = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=_CHUNK_TIMEOUT, check=False)
+    except subprocess.TimeoutExpired:
+        return ''
+    txt = Path(str(out_stem) + '.txt')
+    if r.returncode != 0 or not txt.is_file():
+        return ''
+    return txt.read_text(encoding='utf-8', errors='replace').strip()
+
+
+def _run_whisper_chunk(cli: str, model: Path, wav_path: Path,
+                       offset_ms: int, duration_ms: int, out_stem: Path) -> str:
+    """Run Whisper on a time window; uses in-memory daemon when available."""
+    daemon = _get_daemon(str(model))
+    if daemon:
+        result = daemon.transcribe(wav_path, offset_ms, duration_ms)
+        if result is not None:
+            return result
+    return _run_whisper_chunk_cli(cli, model, wav_path, offset_ms, duration_ms, out_stem)
+
+
+def _guess_lang(text: str) -> str:
+    """Heuristic: return 'bn', 'mixed', or 'en' from Unicode block membership."""
+    has_bangla = any('\u0980' <= c <= '\u09FF' for c in text)
+    has_latin = any(c.isascii() and c.isalpha() for c in text)
+    if has_bangla and has_latin:
+        return 'mixed'
+    if has_bangla:
+        return 'bn'
+    return 'en'
+
+
+def _is_low_confidence(transcript: str, duration_secs: float) -> bool:
+    """Heuristic: too few words for the duration, or all-blank markers."""
+    if not transcript or duration_secs < 5:
+        return False
+    words = transcript.split()
+    wpm = (len(words) / duration_secs) * 60
+    upper = transcript.upper()
+    has_blank = any(m in upper for m in _BLANK_MARKERS)
+    return wpm < _LOW_CONF_WPM or has_blank
+
+
+class LocalMultilingualSttAdapter:
+    """Offline Whisper CLI transcription for Bengali, English and mixed speech.
+
+    Supports audio up to ~5.5 minutes by processing in 55-second chunks.
+    Requires a multilingual ggml model; English-only models are rejected.
+    Audio and transcripts remain in local private temporary files only.
+    """
+
+    def __init__(self, cli=None, model=None, ffmpeg=None):
+        local_cli = (Path(__file__).resolve().parent.parent / 'state' / 'tools'
+                     / 'whisper.cpp' / 'build' / 'bin' / 'whisper-cli')
+        local_ffmpeg = (Path(__file__).resolve().parent.parent / 'state' / 'tools'
+                        / 'ffmpeg-7.1.5' / 'ffmpeg')
+        self.cli = (cli or os.environ.get('ZAMAL_WHISPER_CLI')
+                    or (str(local_cli) if local_cli.is_file() else None)
+                    or shutil.which('whisper-cli'))
+        self.ffmpeg = (ffmpeg or os.environ.get('ZAMAL_FFMPEG_CLI')
+                       or (str(local_ffmpeg) if local_ffmpeg.is_file() else None)
+                       or shutil.which('ffmpeg'))
+        # ggml-small is the minimum for reliable Bangla/multilingual accuracy.
+        # Fall back to base only if small is absent.
+        _models_dir = Path(__file__).resolve().parent.parent / 'state' / 'models'
+        _small = _models_dir / 'ggml-small.bin'
+        _base  = _models_dir / 'ggml-base.bin'
+        _default_model = str(_small if _small.is_file() else _base)
+        self.model = model or os.environ.get('ZAMAL_WHISPER_MODEL') or _default_model
+
+    def transcribe(self, audio_path: Path) -> SttResult:
+        if not self.cli or not Path(self.cli).is_file():
+            return SttResult(pending=True, error='local_whisper_cli_unavailable')
+        model = Path(self.model)
+        if not model.is_file() or '.en.' in model.name:
+            return SttResult(pending=True, error='local_multilingual_model_unavailable')
+        if not self.ffmpeg or not Path(self.ffmpeg).is_file():
+            return SttResult(pending=True, error='local_opus_decoder_unavailable')
+        try:
+            with tempfile.TemporaryDirectory(prefix='zamal_local_stt_') as tmp:
+                wav = Path(tmp) / 'audio.wav'
+                _t_ffmpeg_start = time.monotonic()
+                _tlog('ffmpeg_start')
+                converted = subprocess.run(
+                    [self.ffmpeg, '-nostdin', '-loglevel', 'error', '-y',
+                     '-i', str(audio_path), '-ar', '16000', '-ac', '1',
+                     '-c:a', 'pcm_s16le', str(wav)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=120, check=False)
+                _tlog(f'ffmpeg_done {time.monotonic()-_t_ffmpeg_start:.2f}s')
+                if converted.returncode != 0 or not wav.is_file():
+                    return SttResult(pending=True, error='local_opus_conversion_failed')
+
+                duration = _probe_duration(self.ffmpeg, wav)
+                _t_whisper_start = time.monotonic()
+                _tlog(f'whisper_start (audio_duration={duration:.1f}s)')
+                parts = self._transcribe_chunked(wav, model, Path(tmp), duration)
+                _tlog(f'whisper_done {time.monotonic()-_t_whisper_start:.2f}s')
+
+                if parts is None:
+                    return SttResult(pending=True, error='local_transcription_failed')
+                transcript = ' '.join(p for p in parts if p).strip()
+                if not transcript:
+                    return SttResult(pending=True, error='local_transcription_empty')
+
+                low_conf = _is_low_confidence(transcript, max(duration, 1.0))
+                return SttResult(
+                    transcript=transcript[:MAX_TRANSCRIPT_CHARS],
+                    low_confidence=low_conf,
+                    duration_secs=round(duration, 1),
+                    detected_lang=_guess_lang(transcript),
+                )
+        except (OSError, UnicodeError):
+            return SttResult(pending=True, error='local_transcription_failed')
+
+    def _transcribe_chunked(self, wav: Path, model: Path,
+                             tmp: Path, duration: float) -> list:
+        """Return list of chunk texts, or None on hard failure."""
+        if duration <= 0 or duration <= _CHUNK_SECS:
+            # Short audio or unknown duration: single pass.
+            text = _run_whisper_chunk(self.cli, model, wav, 0, 0,
+                                      tmp / 'chunk_0')
+            if text is None:
+                return None
+            return [text]
+
+        n_chunks = min(_MAX_CHUNKS,
+                       int(duration / _CHUNK_SECS) + (1 if duration % _CHUNK_SECS else 0))
+        parts = []
+        for i in range(n_chunks):
+            offset_ms = int(i * _CHUNK_SECS * 1000)
+            remaining = duration - i * _CHUNK_SECS
+            if remaining <= 0:
+                break
+            dur_ms = int(min(_CHUNK_SECS, remaining) * 1000)
+            text = _run_whisper_chunk(self.cli, model, wav,
+                                      offset_ms, dur_ms, tmp / f'chunk_{i}')
+            parts.append(text)
+        return parts if parts else None
 
 
 class MacOsSttAdapter:
@@ -316,7 +589,7 @@ class Intake:
     def __init__(self, store: Store, inbox: Path = None, stt=None):
         self.store = store
         self.inbox = Path(inbox) if inbox else Path(__file__).resolve().parent.parent / 'inbox'
-        self.stt = stt if stt is not None else MacOsSttAdapter()
+        self.stt = stt if stt is not None else LocalMultilingualSttAdapter()
 
     def _resolve_path(self, ref: str) -> Path:
         if not isinstance(ref, str) or not ref.strip():
@@ -451,9 +724,9 @@ class Intake:
 
     def record_voice(self, task_id: str, revision: int, file_ref: str,
                      manual_transcript: str = None) -> dict:
-        """Accept a voice file; transcribe if possible, else mark pending.
+        """Accept a voice file; transcribe locally or mark pending.
 
-        Transcript is plain text evidence only; it is never executed.
+        Intake stores the transcript as evidence without executing it.
         Providing manual_transcript skips STT.
         """
         from .safety import Controls
@@ -491,6 +764,12 @@ class Intake:
             if stt.transcript is not None:
                 item['transcript'] = stt.transcript
                 item['stt_status'] = 'transcribed'
+                if stt.low_confidence:
+                    item['stt_low_confidence'] = True
+                if stt.duration_secs:
+                    item['duration_secs'] = stt.duration_secs
+                if stt.detected_lang:
+                    item['detected_lang'] = stt.detected_lang
             else:
                 item['stt_status'] = 'pending_transcription'
                 if stt.error:

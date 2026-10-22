@@ -1716,147 +1716,122 @@ def _exec_calendar_delete(payload: dict) -> dict:
         return {'ok': bool(ok3), 'raw': str(out3)[:200]}
 
 
-def _exec_whatsapp_send(payload: dict) -> dict:
-    """Send approved WhatsApp message via browser.
-
-    Navigates to the designated test contact (Jamal BD Number) by searching
-    the sidebar. WhatsApp Business web does not
-    offer a 'Message yourself' self-chat. Send button is button[aria-label=Send]
-    (data-testid=send does not exist in 2026 WA Business UI).
-    """
+def resolve_whatsapp_contact(destination: str) -> dict:
+    """Count exact saved-name metadata in WhatsApp search results only."""
     import time as _t
     from .ai_browser_transport import _exec_js_in_domain
 
-    content = payload.get('content', '')
+    if not isinstance(destination, str) or not destination.strip() or len(destination) > 200:
+        return {'status': 'INVALID_DESTINATION'}
+    destination = destination.strip()
+    search_js = '''(function(){
+      var box=document.querySelector('input[placeholder*="Search or start"]') ||
+              document.querySelector('input[aria-label*="Search or start"]');
+      if(!box) return JSON.stringify({ok:false,error:'SESSION_REQUIRED'});
+      box.focus();
+      var setter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+      setter.call(box,%s);
+      box.dispatchEvent(new Event('input',{bubbles:true}));
+      return JSON.stringify({ok:true});
+    })()''' % json.dumps(destination)
+    ok, raw = _exec_js_in_domain('web.whatsapp.com', search_js, timeout=8)
+    try:
+        if not ok or not json.loads(raw or '{}').get('ok'):
+            return {'status': 'SESSION_REQUIRED'}
+    except (TypeError, ValueError):
+        return {'status': 'SESSION_REQUIRED'}
+    _t.sleep(1.2)
+    count_js = '''(function(){
+      var cells=document.querySelectorAll('#pane-side [data-testid="cell-frame-container"]');
+      var exact=0;
+      for(var cell of cells){
+        var name=cell.querySelector('span[title]');
+        if(name && name.getAttribute('title')===%s) exact++;
+      }
+      return JSON.stringify({ok:true,exact_count:exact});
+    })()''' % json.dumps(destination)
+    ok, raw = _exec_js_in_domain('web.whatsapp.com', count_js, timeout=8)
+    try:
+        result = json.loads(raw or '{}')
+        if not ok or result.get('ok') is not True:
+            return {'status': 'SESSION_REQUIRED'}
+        count = int(result['exact_count'])
+    except (TypeError, ValueError, KeyError):
+        return {'status': 'SESSION_REQUIRED'}
+    if count == 1:
+        return {'status': 'EXACT_ONE', 'destination': destination}
+    return {'status': 'NO_EXACT_CONTACT' if count == 0 else 'AMBIGUOUS_CONTACT'}
+
+
+def _exec_whatsapp_send(payload: dict) -> dict:
+    """Send once after approval, without reading any chat content or history."""
+    from .ai_browser_transport import _exec_js_in_domain
+
     destination = payload.get('raw_destination') or payload.get('destination', '')
-    if destination != 'Jamal BD Number':
-        return {'ok': False, 'error': 'unauthorized_test_destination'}
-    if not content:
-        return {'ok': False, 'error': 'empty_message'}
+    content = payload.get('content', '')
+    if not isinstance(content, str) or not content or len(content) > 2000:
+        return {'ok': False, 'error': 'invalid_message'}
+    resolution = resolve_whatsapp_contact(destination)
+    if resolution['status'] != 'EXACT_ONE':
+        return {'ok': False, 'error': resolution['status']}
 
-    # Step 1: Navigate to test contact via main sidebar search
-    js_search = '''(function(){
-      var inp = document.querySelector('input[placeholder*="Search or start"]') ||
-                document.querySelector('input[aria-label*="Search or start"]');
-      if(!inp) return JSON.stringify({ok:false,error:'no_search_input'});
-      inp.focus();
-      var niv = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
-      niv.call(inp, %s);
-      inp.dispatchEvent(new Event('input',{bubbles:true}));
-      inp.dispatchEvent(new Event('change',{bubbles:true}));
-      return JSON.stringify({ok:true,stage:'search_triggered'});
+    click_js = '''(function(){
+      var cells=document.querySelectorAll('#pane-side [data-testid="cell-frame-container"]');
+      var matches=Array.from(cells).filter(function(cell){
+        var name=cell.querySelector('span[title]');
+        return name && name.getAttribute('title')===%s;
+      });
+      if(matches.length!==1) return JSON.stringify({ok:false,error:'CONTACT_CHANGED'});
+      matches[0].click();
+      return JSON.stringify({ok:true});
     })()''' % json.dumps(destination)
-    ok1, out1 = _exec_js_in_domain('web.whatsapp.com', js_search, timeout=8)
-    _t.sleep(1.5)
-
-    # Step 2: Click the first matching conversation using full mouse event sequence
-    js_click = '''(function(){
-      var label = document.querySelector('[title=%s]');
-      var target = label && label.closest('[data-testid="cell-frame-container"]');
-      if(!target) return JSON.stringify({ok:false,error:'no_exact_test_contact'});
-      target.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true}));
-      target.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true}));
-      target.click();
-      return JSON.stringify({ok:true,stage:'test_contact_selected'});
-    })()''' % json.dumps(destination)
-    ok2, out2 = _exec_js_in_domain('web.whatsapp.com', js_click, timeout=8)
-    _t.sleep(4.0)  # WA Business needs extra time to render conversation panel
+    ok, raw = _exec_js_in_domain('web.whatsapp.com', click_js, timeout=8)
     try:
-        r2 = json.loads(out2 or '{}')
-        if not r2.get('ok'):
-            return {'ok': False, 'error': r2.get('error', 'contact_nav_failed'), 'raw': out2[:120]}
-    except Exception:
-        return {'ok': False, 'error': 'contact_nav_parse_error'}
+        if not ok or not json.loads(raw or '{}').get('ok'):
+            return {'ok': False, 'error': 'CONTACT_CHANGED'}
+    except (TypeError, ValueError):
+        return {'ok': False, 'error': 'CONTACT_CHANGED'}
 
-    # Confirm the selected chat by its exact header title, then count only exact
-    # matching outbound messages. No surrounding message text is returned.
-    js_preflight = f'''(function(){{
-      var main = document.querySelector('#main');
-      if(!main) return JSON.stringify({{ok:false,target_verified:false}});
-      var mainRect = main.getBoundingClientRect();
-      var selected = Array.from(document.querySelectorAll('#main header span'))
-        .some(function(el){{ return (el.textContent||'').trim() === {json.dumps(destination)}; }});
-      var matches = Array.from(document.querySelectorAll('#main [data-testid="selectable-text"]'))
-        .filter(function(el){{ var r=el.getBoundingClientRect();
-          return (el.textContent||'').trim() === {json.dumps(content)} &&
-            (r.left+r.width/2) > (mainRect.left+mainRect.width/2); }}).length;
-      return JSON.stringify({{ok:selected,target_verified:selected,exact_outbound_before:matches}});
-    }})()'''
-    ok_pre, out_pre = _exec_js_in_domain('web.whatsapp.com', js_preflight, timeout=8)
+    compose_js = '''(function(){
+      var header=document.querySelector('#main header');
+      var name=header && header.querySelector('span[title]');
+      var named=name && name.getAttribute('title')===%s;
+      if(!named) return JSON.stringify({ok:false,error:'WRONG_TARGET'});
+      var box=document.querySelector('#main [data-testid="conversation-compose-box-input"]');
+      if(!box) return JSON.stringify({ok:false,error:'SESSION_REQUIRED'});
+      if(box.querySelector('[data-lexical-text]'))
+        return JSON.stringify({ok:false,error:'EXISTING_DRAFT'});
+      box.focus();
+      document.execCommand('insertText',false,%s);
+      return JSON.stringify({ok:true});
+    })()''' % (json.dumps(destination), json.dumps(content))
+    ok, raw = _exec_js_in_domain('web.whatsapp.com', compose_js, timeout=8)
     try:
-        preflight = json.loads(out_pre or '{}')
-        if not ok_pre or not preflight.get('target_verified'):
-            return {'ok': False, 'error': 'wrong_target_chat'}
-        outbound_before = int(preflight.get('exact_outbound_before', 0))
-    except Exception:
-        return {'ok': False, 'error': 'target_preflight_parse_error'}
+        result = json.loads(raw or '{}')
+        if not ok or not result.get('ok'):
+            return {'ok': False, 'error': result.get('error', 'COMPOSE_FAILED')}
+    except (TypeError, ValueError):
+        return {'ok': False, 'error': 'COMPOSE_FAILED'}
 
-    # Step 3: Fill compose (select-all + insertText)
-    js_fill = f'''(function(){{
-      var inp = document.querySelector('[data-testid=conversation-compose-box-input]');
-      if(!inp) return JSON.stringify({{ok:false,error:'no_compose'}});
-      inp.focus();
-      var sel = window.getSelection();
-      var range = document.createRange();
-      range.selectNodeContents(inp);
-      sel.removeAllRanges();
-      sel.addRange(range);
-      document.execCommand('insertText', false, {json.dumps(content[:500])});
-      inp.dispatchEvent(new Event('input', {{bubbles:true}}));
-      return JSON.stringify({{ok:true,stage:'compose_filled',len:inp.textContent.length}});
-    }})()'''
-    ok3, out3 = _exec_js_in_domain('web.whatsapp.com', js_fill, timeout=8)
-    _t.sleep(1.2)  # React DOM update can be async; wait before len check
-    try:
-        r3 = json.loads(out3 or '{}')
-        if not r3.get('ok'):
-            return {'ok': False, 'error': r3.get('error', 'fill_failed')}
-    except Exception:
-        pass
-
-    # Step 4: Click send (button[aria-label=Send])
-    js_send = '''(function(){
-      var sendBtn = document.querySelector('button[aria-label="Send"]') ||
-                   document.querySelector('[aria-label="Send"]');
-      if(!sendBtn) return JSON.stringify({ok:false,error:'no_send_btn'});
-      var r = sendBtn.getBoundingClientRect();
-      if(r.width === 0) return JSON.stringify({ok:false,error:'send_btn_invisible'});
-      sendBtn.click();
+    send_js = '''(function(){
+      var header=document.querySelector('#main header');
+      var name=header && header.querySelector('span[title]');
+      var named=name && name.getAttribute('title')===%s;
+      if(!named) return JSON.stringify({ok:false,error:'WRONG_TARGET'});
+      var btn=document.querySelector('#main button[aria-label="Send"]');
+      if(!btn || btn.disabled) return JSON.stringify({ok:false,error:'SEND_UNAVAILABLE'});
+      btn.click();
       return JSON.stringify({ok:true,stage:'send_clicked'});
-    })()'''
-    ok4, out4 = _exec_js_in_domain('web.whatsapp.com', js_send, timeout=8)
-    _t.sleep(2.0)
-
-    # Step 5: Verify one new exact outbound message in the selected chat.
-    js_verify = f'''(function(){{
-      var main = document.querySelector('#main');
-      if(!main) return JSON.stringify({{ok:false,target_verified:false}});
-      var mainRect = main.getBoundingClientRect();
-      var selected = Array.from(document.querySelectorAll('#main header span'))
-        .some(function(el){{ return (el.textContent||'').trim() === {json.dumps(destination)}; }});
-      var matches = Array.from(document.querySelectorAll('#main [data-testid="selectable-text"]'))
-        .filter(function(el){{ var r=el.getBoundingClientRect();
-          return (el.textContent||'').trim() === {json.dumps(content)} &&
-            (r.left+r.width/2) > (mainRect.left+mainRect.width/2); }}).length;
-      var delta = matches - {outbound_before};
-      return JSON.stringify({{ok:selected&&delta===1,target_verified:selected,
-        exact_outbound_delta:delta,verified_in_dom:selected&&delta===1}});
-    }})()'''
-    ok5, out5 = _exec_js_in_domain('web.whatsapp.com', js_verify, timeout=8)
-
+    })()''' % json.dumps(destination)
+    ok, raw = _exec_js_in_domain('web.whatsapp.com', send_js, timeout=8)
     try:
-        send_r = json.loads(out4 or '{}')
-        verify_r = json.loads(out5 or '{}')
-        if send_r.get('stage') == 'send_clicked' and verify_r.get('verified_in_dom'):
-            return {'ok': True, 'stage': 'sent', 'verified_in_dom': True,
-                    'target_verified': True, 'exact_outbound_delta': 1}
-        if send_r.get('stage') == 'send_clicked':
-            return {'ok': False, 'error': 'send_not_visibly_verified',
-                    'target_verified': verify_r.get('target_verified', False),
-                    'exact_outbound_delta': verify_r.get('exact_outbound_delta')}
-        return {'ok': False, 'error': send_r.get('error', 'send_failed'), 'detail': send_r}
-    except Exception:
-        return {'ok': bool(ok4), 'raw': str(out4)[:200]}
+        result = json.loads(raw or '{}')
+        if ok and result.get('stage') == 'send_clicked':
+            return {'ok': True, 'stage': 'send_clicked',
+                    'delivery_verified': False, 'privacy': 'no_chat_content_read'}
+        return {'ok': False, 'error': result.get('error', 'SEND_UNCERTAIN')}
+    except (TypeError, ValueError):
+        return {'ok': False, 'error': 'SEND_UNCERTAIN'}
 
 
 def _exec_facebook_send(payload: dict) -> dict:

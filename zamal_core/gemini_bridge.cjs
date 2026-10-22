@@ -15,6 +15,22 @@ function regular(file, privateFile = false) {
   if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1 || (privateFile && (st.mode & 0o077))) fail('unsafe_local_configuration');
   return st;
 }
+function chatBody(request) {
+  if (!request || request.schema !== 2 || typeof request.text !== 'string' ||
+      !request.text.trim() || Buffer.byteLength(request.text) > 4000) fail('invalid_chat_request');
+  return {
+    contents: [{role: 'user', parts: [{text: request.text}]}],
+    tools: [], generationConfig: {maxOutputTokens: 1024},
+  };
+}
+function chatText(value) {
+  if (!Array.isArray(value.candidates) || !value.candidates.length) fail('invalid_response');
+  const c = value.candidates[0];
+  if (!c.content?.parts) fail('incomplete_response');
+  const text = c.content.parts.filter(p => typeof p.text === 'string').map(p => p.text).join('');
+  if (!text) fail('invalid_response');
+  return {reply: text.slice(0, 4000)};
+}
 function generationBody(request) {
   if (!request || request.schema !== 1 || !['planner','coder','verifier'].includes(request.stage) ||
       !Array.isArray(request.tools) || request.tools.length || !request.context?.context_id ||
@@ -67,6 +83,22 @@ async function main() {
   const cfg=await configuration();
   if(process.argv[2]==='--probe') {
     process.stdout.write(JSON.stringify({ready:true,model:cfg.model,reference:cfg.reference,identity:cfg.identity}));return;
+  }
+  if(process.argv[2]==='--chat') {
+    if(process.argv[3]!==cfg.identity) fail('configuration_changed');
+    let input='';for await(const chunk of process.stdin){input+=chunk;if(Buffer.byteLength(input)>8000)fail('input_limit');}
+    const body=JSON.stringify(chatBody(JSON.parse(input)));
+    const response=await new Promise((resolve,reject)=>{
+      const req=https.request({hostname:HOST,port:443,path:`/v1beta/${cfg.model}:generateContent`,method:'POST',
+        headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body),'x-goog-api-key':cfg.key},
+        timeout:45000},res=>{
+          if(res.statusCode!==200){res.resume();reject(new Error('provider_http_'+res.statusCode));return;}
+          let output='';res.on('data',chunk=>{output+=chunk;if(Buffer.byteLength(output)>MAX)res.destroy(new Error('output_limit'));});
+          res.on('error',reject);res.on('end',()=>{try{resolve(chatText(JSON.parse(output)));}catch(e){reject(e);}});
+        });
+      req.on('timeout',()=>req.destroy(new Error('provider_timeout')));req.on('error',reject);req.end(body);
+    });
+    process.stdout.write(JSON.stringify(response));return;
   }
   if(process.argv[2]!=='--invoke' || process.argv[3]!==cfg.identity) fail('configuration_changed');
   let input='';for await(const chunk of process.stdin){input+=chunk;if(Buffer.byteLength(input)>250000)fail('input_limit');}

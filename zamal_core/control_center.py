@@ -118,8 +118,22 @@ def _check_n8n():
 
 
 def _check_gemini():
-    """Gemini is accessed via n8n; report n8n reachability."""
-    return _check_n8n()
+    """Probe the real Gemini API using GEMINI_API_KEY from auth.env."""
+    _load_auth_env()
+    key = os.environ.get('GEMINI_API_KEY', '').strip()
+    if not key:
+        return 'unconfigured'
+    try:
+        url = f'https://generativelanguage.googleapis.com/v1beta/models?key={key}'
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=5):
+            return 'ok'
+    except urllib.error.HTTPError as e:
+        if e.code in (400, 401, 403):
+            return 'invalid_key'
+        return 'unreachable'
+    except Exception:
+        return 'unreachable'
 
 
 def _check_browser():

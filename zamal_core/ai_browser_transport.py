@@ -12,11 +12,16 @@ Provider status states:
   NOT_CONFIGURED   — non-darwin platform; browser integration not available
 """
 import json
+import os
+import stat
 import sys
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 _IS_DARWIN = sys.platform == 'darwin'
 
@@ -326,7 +331,7 @@ def _open_tab(url: str) -> bool:
 
 
 def _exec_js_in_domain(domain: str, js: str, timeout: int = 12) -> tuple:
-    """Execute JS in the active Chrome tab matching domain; fall back to last match.
+    """Execute JS once in the active matching Chrome tab, else first match.
 
     Broad DOM/page-text extraction patterns are blocked for private-message domains
     (mail, WhatsApp, Messenger, Instagram, Facebook). The call is rejected with
@@ -341,7 +346,7 @@ def _exec_js_in_domain(domain: str, js: str, timeout: int = 12) -> tuple:
     except ImportError:
         pass
     js_safe = js.replace('\\', '\\\\').replace('"', '\\"')
-    # Prefer active tab first, then last matching tab
+    # Prefer active tab first; never execute a mutating script in multiple tabs.
     script = (
         f'tell application "Google Chrome"\n'
         f'  -- Check active tab first\n'
@@ -352,16 +357,16 @@ def _exec_js_in_domain(domain: str, js: str, timeout: int = 12) -> tuple:
         f'      return r as string\n'
         f'    end if\n'
         f'  end repeat\n'
-        f'  -- Fall back to last matching tab\n'
-        f'  set lastResult to "NO_TAB"\n'
+        f'  -- Fall back to one matching tab\n'
         f'  repeat with w in windows\n'
         f'    repeat with t in tabs of w\n'
         f'      if (URL of t) contains "{domain}" then\n'
-        f'        set lastResult to execute t javascript "{js_safe}"\n'
+        f'        set r to execute t javascript "{js_safe}"\n'
+        f'        return r as string\n'
         f'      end if\n'
         f'    end repeat\n'
         f'  end repeat\n'
-        f'  return lastResult as string\n'
+        f'  return "NO_TAB"\n'
         f'end tell'
     )
     ok, out = _run_osascript(script, timeout=timeout)
@@ -415,6 +420,57 @@ def _parse_login_result(js_output: str) -> bool:
         return False
 
 
+# ── Gemini direct-API helpers ──────────────────────────────────────────────
+
+def _gemini_api_key() -> str:
+    """Return GEMINI_API_KEY, loading auth.env if not yet in os.environ."""
+    key = os.environ.get('GEMINI_API_KEY', '').strip()
+    if key:
+        return key
+    try:
+        auth = Path(__file__).resolve().parent.parent / 'state' / 'gateway' / 'auth.env'
+        if auth.exists() and not (auth.stat().st_mode & (stat.S_IRGRP | stat.S_IROTH)):
+            with open(auth) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('GEMINI_API_KEY='):
+                        val = line.split('=', 1)[1].strip()
+                        if val:
+                            os.environ['GEMINI_API_KEY'] = val
+                            return val
+    except Exception:
+        pass
+    return ''
+
+
+def _gemini_api_infer(prompt: str, timeout: int = 30) -> dict:
+    """Call Gemini REST API directly. Returns router-compatible result dict."""
+    key = _gemini_api_key()
+    if not key:
+        return {'ok': False, 'error': 'no_api_key', 'status': 'NOT_CONFIGURED'}
+    url = (
+        'https://generativelanguage.googleapis.com/v1beta/models/'
+        f'gemini-3.6-flash:generateContent?key={key}'
+    )
+    body = json.dumps({'contents': [{'parts': [{'text': prompt}]}]}).encode()
+    req = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+        text = data['candidates'][0]['content']['parts'][0]['text']
+        return {'ok': True, 'provider': 'gemini', 'status': 'LIVE_VERIFIED',
+                'response': text, 'response_length': len(text)}
+    except urllib.error.HTTPError as e:
+        code = e.code
+        if code in (401, 403):
+            return {'ok': False, 'error': f'api_http_{code}', 'status': 'NOT_CONFIGURED'}
+        if code == 429:
+            return {'ok': False, 'error': 'rate_limited', 'status': 'RATE_LIMITED'}
+        return {'ok': False, 'error': f'api_http_{code}', 'status': 'UNAVAILABLE'}
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc)[:80], 'status': 'UNAVAILABLE'}
+
+
 # ── Transport class ────────────────────────────────────────────────────────
 
 class BrowserAITransport:
@@ -452,6 +508,16 @@ class BrowserAITransport:
         return self._health[provider]
 
     def _check_provider(self, provider: str) -> str:
+        if provider == 'gemini' and _gemini_api_key():
+            key = _gemini_api_key()
+            url = f'https://generativelanguage.googleapis.com/v1beta/models?key={key}'
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url), timeout=5):
+                    return 'LIVE_VERIFIED'
+            except urllib.error.HTTPError as e:
+                return 'NOT_CONFIGURED' if e.code in (401, 403) else 'UNAVAILABLE'
+            except Exception:
+                return 'UNAVAILABLE'
         if not _IS_DARWIN:
             return 'NOT_CONFIGURED'
         if not _chrome_running():
@@ -480,7 +546,16 @@ class BrowserAITransport:
 
     def submit_task(self, provider: str, prompt: str,
                     timeout: int = 90) -> dict:
-        """Submit prompt to provider browser session. Returns result dict."""
+        """Submit prompt to provider. Uses direct API for Gemini when key is set."""
+        if provider == 'gemini' and _gemini_api_key():
+            result = _gemini_api_infer(prompt, timeout=min(timeout, 30))
+            if result['ok']:
+                self._mark_success('gemini', result['response'])
+            elif result.get('status') == 'RATE_LIMITED':
+                self._mark('gemini', 'RATE_LIMITED')
+            else:
+                self._mark_failure('gemini')
+            return result
         if provider not in PROVIDER_CONFIGS:
             return {'ok': False, 'error': 'unknown_provider', 'status': 'NOT_CONFIGURED'}
         if not _IS_DARWIN:
